@@ -3,10 +3,22 @@ import { cn } from '../lib/utils'
 export type CompactStatTone = 'neutral' | 'success' | 'warning' | 'danger'
 
 const TONE_STYLE: Record<CompactStatTone, { chip: string; dot: string }> = {
-  neutral: { chip: 'bg-muted text-muted-foreground', dot: 'bg-muted-foreground' },
-  success: { chip: 'bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]', dot: 'bg-[hsl(var(--success))]' },
-  warning: { chip: 'bg-[hsl(var(--warning-bg))] text-[hsl(var(--warning))]', dot: 'bg-[hsl(var(--warning))]' },
-  danger: { chip: 'bg-destructive/10 text-destructive', dot: 'bg-destructive' },
+  neutral: {
+    chip: 'bg-muted/75 text-muted-foreground ring-1 ring-inset ring-border/70 dark:bg-white/[0.06] dark:ring-white/10',
+    dot: 'bg-muted-foreground/80',
+  },
+  success: {
+    chip: 'bg-emerald-500/10 text-emerald-700 ring-1 ring-inset ring-emerald-500/20 dark:bg-emerald-500/15 dark:text-emerald-300 dark:ring-emerald-400/25',
+    dot: 'bg-emerald-500',
+  },
+  warning: {
+    chip: 'bg-amber-500/10 text-amber-700 ring-1 ring-inset ring-amber-500/25 dark:bg-amber-500/15 dark:text-amber-300 dark:ring-amber-400/25',
+    dot: 'bg-amber-500',
+  },
+  danger: {
+    chip: 'bg-destructive/10 text-destructive ring-1 ring-inset ring-destructive/20 dark:bg-destructive/15 dark:text-red-300 dark:ring-red-400/25',
+    dot: 'bg-destructive',
+  },
 }
 
 /**
@@ -34,12 +46,12 @@ export function CompactStat({
   const toneStyle = TONE_STYLE[tone]
 
   const className = cn(
-    'flex min-h-[72px] w-full items-center justify-between gap-2 rounded-xl border px-2.5 py-2 text-left shadow-sm transition-[border-color,box-shadow,background-color,transform] duration-200 sm:min-h-[84px] sm:gap-3 sm:px-3 sm:py-2.5',
+    'flex min-h-[72px] w-full items-center justify-between gap-2 rounded-xl border px-3 py-2 text-left shadow-xs transition-[border-color,box-shadow,background-color,transform] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] sm:min-h-[84px] sm:gap-3 sm:px-3.5 sm:py-2.5 dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]',
     active
-      ? 'border-primary/40 bg-primary/5 ring-1 ring-primary/25 shadow-sm'
-      : 'border-border bg-card/85 hover:border-border hover:bg-card',
+      ? 'border-primary/45 bg-primary/[0.06] ring-1 ring-primary/25 shadow-sm'
+      : 'border-border/80 bg-card hover:border-border dark:border-white/10 dark:hover:border-white/16',
     onClick &&
-      'cursor-pointer hover:shadow-sm active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
+      'cursor-pointer hover:-translate-y-[1px] hover:shadow-sm active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
   )
 
   const content = (

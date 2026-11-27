@@ -105,7 +105,7 @@
 
 /* Only website presets opt into geometry changes. ThemeProvider removes the
  * preset's class when switching away, restoring all existing component styles. */
-:root:is(.theme-github, .theme-vercel, .theme-google, .theme-apple, .theme-notion, .theme-stripe, .theme-spotify, .theme-slack) {
+:root:is(.theme-studio, .theme-github, .theme-vercel, .theme-google, .theme-apple, .theme-notion, .theme-stripe, .theme-spotify, .theme-slack) {
   &.dark { --website-shadow-color: #00000038; }
 
   [data-slot='card'] {

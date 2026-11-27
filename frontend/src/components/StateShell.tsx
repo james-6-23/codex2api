@@ -1,8 +1,9 @@
 import type { HTMLAttributes, ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
-import { AlertCircle, Inbox, Loader2 } from 'lucide-react'
+import { AlertCircle, Inbox } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
+import { PixelLoader, ShimmerText } from '@/components/ui/beautiful'
 
 interface StateShellProps {
   children: ReactNode
@@ -80,21 +81,15 @@ export default function StateShell({
   if (loading) {
     return (
       <ShellFrame variant={variant} role="status" aria-live="polite">
-        <div className="flex size-14 items-center justify-center rounded-2xl bg-primary/10 text-primary ring-1 ring-primary/15">
-          <Loader2 className="size-6 animate-spin" />
+        <div className="flex size-14 items-center justify-center rounded-2xl border border-primary/15 bg-primary/[0.08] text-primary shadow-2xs ring-1 ring-inset ring-primary/10">
+          <PixelLoader mode="drive" size="lg" />
         </div>
-        <strong className="text-lg font-bold tracking-tight text-foreground">{resolvedLoadingTitle}</strong>
+        <strong className="text-base font-semibold tracking-tight text-foreground sm:text-lg">
+          <ShimmerText>{resolvedLoadingTitle}</ShimmerText>
+        </strong>
         <p className="text-sm leading-relaxed text-muted-foreground">{resolvedLoadingDescription}</p>
-        <div className="mt-1 grid w-full max-w-xs grid-cols-3 gap-2">
-          {[0, 1, 2].map((i) => (
-            <div
-              key={i}
-              className="h-1.5 rounded-full bg-muted"
-              style={{ opacity: 1 - i * 0.22 }}
-            >
-              <div className="h-full w-2/3 animate-pulse rounded-full bg-primary/40" />
-            </div>
-          ))}
+        <div className="mt-0.5 inline-flex items-center gap-2 rounded-full border border-border/70 bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
+          <PixelLoader mode="dots" size="sm" showElapsed />
         </div>
       </ShellFrame>
     )

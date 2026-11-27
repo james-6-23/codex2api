@@ -2,8 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  Check,
+  ChevronDown,
   Download,
+  Eye,
+  EyeOff,
   FolderOpen,
+  Globe,
   KeyRound,
   Loader2,
   Pencil,
@@ -13,6 +18,7 @@ import {
   RefreshCw,
   Search,
   Sliders,
+  SlidersHorizontal,
   Trash2,
   Upload,
   X,
@@ -54,6 +60,7 @@ import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
 import Pagination from "../components/Pagination";
 import { ProxyField } from "../components/ProxyField";
+import { SegmentedTabs } from "../components/SegmentedTabs";
 import StateShell from "../components/StateShell";
 import StatusBadge from "../components/StatusBadge";
 import TestConnectionModal from "../components/TestConnectionModal";
@@ -63,6 +70,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { FilterChipBar } from "@/components/ui/beautiful";
 import { useConfirmDialog } from "../hooks/useConfirmDialog";
 import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from "../hooks/usePersistedPageSize";
 import { useToast } from "../hooks/useToast";
@@ -73,7 +81,7 @@ import { getErrorMessage } from "../utils/error";
 import { formatBeijingTime, formatRelativeTime } from "../utils/time";
 
 const TEXTAREA_CLASS =
-  "flex min-h-[140px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50";
+  "flex min-h-[168px] w-full resize-y rounded-lg border border-input bg-background px-3 py-2.5 font-mono text-xs leading-relaxed text-foreground shadow-2xs transition-colors placeholder:text-muted-foreground/80 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30";
 
 const DEFAULT_GO_BASE_URL = "https://opencode.ai/zen/go/v1";
 const DEFAULT_GO_ANTHROPIC_URL = "https://opencode.ai/zen/go";
@@ -103,10 +111,130 @@ const PROTOCOL_OPTIONS = [
   { value: "anthropic", label: "Anthropic Messages" },
 ];
 
-const MODE_OPTIONS = [
-  { value: "go", label: "OpenCode Go（订阅套餐，支持三窗口额度）" },
-  { value: "zen", label: "OpenCode Zen（按量付费网关）" },
+const MODE_CARD_OPTIONS: Array<{
+  value: OpenCodeMode;
+  title: string;
+  badge: string;
+  badgeClassName: string;
+  description: string;
+}> = [
+  {
+    value: "go",
+    title: "OpenCode Go",
+    badge: "订阅套餐",
+    badgeClassName: "bg-emerald-500/12 text-emerald-700 ring-emerald-500/20 dark:text-emerald-300",
+    description: "支持 5h / 周 / 月三窗口额度自动同步",
+  },
+  {
+    value: "zen",
+    title: "OpenCode Zen",
+    badge: "按量付费",
+    badgeClassName: "bg-sky-500/12 text-sky-700 ring-sky-500/20 dark:text-sky-300",
+    description: "按量计费网关，无需额度窗口同步",
+  },
 ];
+
+function OpenCodeModeCards({
+  value,
+  onChange,
+  disabled = false,
+}: {
+  value: OpenCodeMode;
+  onChange: (next: OpenCodeMode) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div role="radiogroup" className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+      {MODE_CARD_OPTIONS.map((option) => {
+        const active = value === option.value;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            disabled={disabled}
+            onClick={() => onChange(option.value)}
+            className={cn(
+              "group relative flex flex-col items-start gap-1 rounded-xl border px-3.5 py-2.5 text-left transition-all outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60",
+              active
+                ? "border-primary/70 bg-primary/[0.045] shadow-2xs ring-1 ring-primary/15"
+                : "border-border/80 bg-background hover:border-border hover:bg-muted/30",
+            )}
+          >
+            <div className="flex w-full items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="text-xs font-semibold text-foreground">{option.title}</span>
+                <span
+                  className={cn(
+                    "inline-flex shrink-0 items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset",
+                    option.badgeClassName,
+                  )}
+                >
+                  {option.badge}
+                </span>
+              </div>
+              <span
+                className={cn(
+                  "flex size-4 shrink-0 items-center justify-center rounded-full border transition-colors",
+                  active
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-muted-foreground/30 bg-background group-hover:border-muted-foreground/50",
+                )}
+              >
+                {active ? <Check className="size-2.5 stroke-[3]" /> : null}
+              </span>
+            </div>
+            <p className="text-[11px] leading-snug text-muted-foreground">{option.description}</p>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function FieldLabel({
+  children,
+  required,
+  optional,
+  hint,
+}: {
+  children: ReactNode;
+  required?: boolean;
+  optional?: boolean;
+  hint?: string;
+}) {
+  return (
+    <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+      <label className="inline-flex items-center gap-1.5 text-xs font-medium text-foreground">
+        <span>{children}</span>
+        {required ? <span className="text-destructive">*</span> : null}
+        {optional ? <span className="font-normal text-muted-foreground/80">可选</span> : null}
+      </label>
+      {hint ? <span className="text-[11px] text-muted-foreground">{hint}</span> : null}
+    </div>
+  );
+}
+
+function detectImportSummary(content: string): string | null {
+  const trimmed = content.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) return `JSON 数组 · ${parsed.length} 项`;
+      if (parsed && typeof parsed === "object") {
+        const accounts = (parsed as { accounts?: unknown; data?: unknown }).accounts ?? (parsed as { data?: unknown }).data;
+        if (Array.isArray(accounts)) return `JSON 对象 · ${accounts.length} 条记录`;
+        return "JSON 对象";
+      }
+    } catch {
+      return "JSON 格式未闭合";
+    }
+  }
+  const lines = trimmed.split(/\r?\n/).filter((line) => line.trim() !== "");
+  return `文本列表 · ${lines.length} 行`;
+}
 
 const STATUS_OPTIONS = [
   { value: "all", label: "全部状态" },
@@ -200,55 +328,83 @@ function ProtocolRulesEditor({
 }) {
   const defaults = mode === "zen" ? DEFAULT_ZEN_RULES : DEFAULT_GO_RULES;
   return (
-    <div className="space-y-2 rounded-lg border border-border bg-muted/20 p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <div className="text-xs font-medium text-foreground">协议路由规则 (protocol_rules)</div>
-          <div className="text-[11px] text-muted-foreground">
-            留空时使用 {mode === "zen" ? "Zen" : "Go"} 内置规则；按顺序首条命中，支持精确名或末尾 <code>*</code>，未命中回落 Chat Completions。
+    <div className="space-y-2.5 rounded-xl border border-border/80 bg-muted/20 p-3.5">
+      <div className="space-y-1.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-foreground">协议路由规则</span>
+            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+              protocol_rules
+            </code>
           </div>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-7 px-2 text-xs"
-            onClick={() => onChange(defaults.map((r) => ({ ...r })))}
-          >
-            载入 {mode === "zen" ? "Zen" : "Go"} 默认
-          </Button>
-          {rules.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
             <Button
               type="button"
-              variant="ghost"
+              variant="outline"
               size="sm"
-              className="h-7 px-2 text-xs text-muted-foreground"
-              onClick={() => onChange([])}
+              className="h-7 px-2.5 text-[11px]"
+              onClick={() => onChange(defaults.map((r) => ({ ...r })))}
             >
-              清空（用内置）
+              载入 {mode === "zen" ? "Zen" : "Go"} 默认
             </Button>
-          )}
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-7 px-2 text-xs"
-            onClick={() => onChange([...rules, { pattern: "", protocol: "chat_completions" }])}
-          >
-            <Plus className="mr-1 size-3" /> 添加规则
-          </Button>
+            {rules.length > 0 && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+                onClick={() => onChange([])}
+              >
+                恢复内置
+              </Button>
+            )}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 px-2.5 text-[11px]"
+              onClick={() => onChange([...rules, { pattern: "", protocol: "chat_completions" }])}
+            >
+              <Plus className="mr-1 size-3" /> 添加规则
+            </Button>
+          </div>
         </div>
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          留空时使用 {mode === "zen" ? "Zen" : "Go"} 内置规则；按顺序首条命中，支持精确名或末尾{" "}
+          <code className="rounded bg-muted px-1 font-mono text-[10px]">*</code>，未命中回落 Chat Completions。
+        </p>
       </div>
 
       {rules.length === 0 ? (
-        <div className="rounded-md border border-dashed border-border/70 px-3 py-2 text-[11px] text-muted-foreground">
-          当前使用内置规则：{defaults.map((r) => `${r.pattern} → ${r.protocol}`).join("，")}；其余 → chat_completions。
+        <div className="rounded-lg border border-dashed border-border/80 bg-background/60 p-2.5">
+          <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            当前生效内置规则
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {defaults.map((r) => (
+              <span
+                key={`${r.pattern}-${r.protocol}`}
+                className="inline-flex items-center gap-1 rounded-md border border-border/70 bg-background px-2 py-0.5 font-mono text-[11px] shadow-2xs"
+              >
+                <span className="text-foreground/90">{r.pattern}</span>
+                <span className="text-muted-foreground/70">→</span>
+                <span className="text-primary">{r.protocol}</span>
+              </span>
+            ))}
+            <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-border/70 bg-muted/40 px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
+              <span>其余</span>
+              <span>→</span>
+              <span>chat_completions</span>
+            </span>
+          </div>
         </div>
       ) : (
         <div className="space-y-2">
           {rules.map((rule, idx) => (
-            <div key={idx} className="flex flex-wrap items-center gap-2">
+            <div key={idx} className="flex items-center gap-2">
+              <span className="w-5 shrink-0 text-center font-mono text-[11px] text-muted-foreground/70">
+                {idx + 1}
+              </span>
               <Input
                 value={rule.pattern}
                 onChange={(e) => {
@@ -257,7 +413,7 @@ function ProtocolRulesEditor({
                   onChange(next);
                 }}
                 placeholder="例如 grok-* / claude-* / *"
-                className="h-8 flex-1 min-w-[140px] font-mono text-xs"
+                className="h-8 min-w-0 flex-1 font-mono text-xs"
               />
               <Select
                 value={rule.protocol}
@@ -268,13 +424,14 @@ function ProtocolRulesEditor({
                 }}
                 options={PROTOCOL_OPTIONS}
                 compact
-                className="w-44"
+                className="w-40 shrink-0 sm:w-44"
               />
               <Button
                 type="button"
                 variant="ghost"
                 size="icon"
-                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+                aria-label="删除规则"
                 onClick={() => onChange(rules.filter((_, i) => i !== idx))}
               >
                 <X className="size-3.5" />
@@ -347,6 +504,8 @@ export default function OpenCodeAccounts({ headerSlot }: { headerSlot?: ReactNod
   const [addProtocolRules, setAddProtocolRules] = useState<OpenCodeProtocolRule[]>([]);
   const [addCustomHeadersText, setAddCustomHeadersText] = useState("");
   const [addAutoSync, setAddAutoSync] = useState(true);
+  const [showAddAPIKey, setShowAddAPIKey] = useState(false);
+  const [showAddAdvanced, setShowAddAdvanced] = useState(false);
 
   const [importContent, setImportContent] = useState("");
   const [importMode, setImportMode] = useState<OpenCodeMode>("go");
@@ -361,6 +520,7 @@ export default function OpenCodeAccounts({ headerSlot }: { headerSlot?: ReactNod
   const [editName, setEditName] = useState("");
   const [editEmail, setEditEmail] = useState("");
   const [editAPIKey, setEditAPIKey] = useState("");
+  const [showEditAPIKey, setShowEditAPIKey] = useState(false);
   const [editMode, setEditMode] = useState<OpenCodeMode>("go");
   const [editBaseURL, setEditBaseURL] = useState("");
   const [editAnthropicBaseURL, setEditAnthropicBaseURL] = useState("");
@@ -464,6 +624,8 @@ export default function OpenCodeAccounts({ headerSlot }: { headerSlot?: ReactNod
     setAddProtocolRules([]);
     setAddCustomHeadersText("");
     setAddAutoSync(true);
+    setShowAddAPIKey(false);
+    setShowAddAdvanced(false);
     setImportContent("");
     setImportMode("go");
     setImportBaseURL("");
@@ -557,6 +719,7 @@ export default function OpenCodeAccounts({ headerSlot }: { headerSlot?: ReactNod
     setEditingAccount(account);
     setEditLoading(true);
     setEditAPIKey("");
+    setShowEditAPIKey(false);
     try {
       const detail = await api.getAccount(account.id);
       const src = detail || account;
@@ -733,6 +896,25 @@ export default function OpenCodeAccounts({ headerSlot }: { headerSlot?: ReactNod
   const zenCount = summary?.opencode_modes?.zen ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / Math.max(1, pageSize)));
 
+  const addAdvancedCount = useMemo(() => {
+    let count = 0;
+    if (addBaseURL.trim() || addAnthropicBaseURL.trim()) count += 1;
+    if (addModels.length > 0) count += 1;
+    if (addProtocolRules.some((r) => r.pattern.trim() !== "")) count += 1;
+    if (addCustomHeadersText.trim()) count += 1;
+    return count;
+  }, [addBaseURL, addAnthropicBaseURL, addModels, addProtocolRules, addCustomHeadersText]);
+
+  const addHeaderError = useMemo(
+    () => (addCustomHeadersText.trim() ? parseHeadersText(addCustomHeadersText).error : null),
+    [addCustomHeadersText],
+  );
+  const editHeaderError = useMemo(
+    () => (editCustomHeadersText.trim() ? parseHeadersText(editCustomHeadersText).error : null),
+    [editCustomHeadersText],
+  );
+  const importSummary = useMemo(() => detectImportSummary(importContent), [importContent]);
+
   return (
     <div className="space-y-4">
       <PageHeader
@@ -768,12 +950,67 @@ export default function OpenCodeAccounts({ headerSlot }: { headerSlot?: ReactNod
 
       {summary && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-          <CompactStat label="总账号" value={summary.total} tone="neutral" />
-          <CompactStat label="可用" value={summary.normal} tone="success" />
-          <CompactStat label="限流" value={summary.rate_limited} tone="warning" />
-          <CompactStat label="异常" value={summary.abnormal} tone="danger" />
-          <CompactStat label="Go 订阅" value={goCount} tone="neutral" />
-          <CompactStat label="Zen 按量" value={zenCount} tone="neutral" />
+          <CompactStat
+            label="总账号"
+            value={summary.total}
+            tone="neutral"
+            active={statusFilter === "all" && modeFilter === "all"}
+            onClick={() => {
+              setStatusFilter("all");
+              setModeFilter("all");
+              setPage(1);
+            }}
+          />
+          <CompactStat
+            label="可用"
+            value={summary.normal}
+            tone="success"
+            active={statusFilter === "normal"}
+            onClick={() => {
+              setStatusFilter((prev) => (prev === "normal" ? "all" : "normal"));
+              setPage(1);
+            }}
+          />
+          <CompactStat
+            label="限流"
+            value={summary.rate_limited}
+            tone="warning"
+            active={statusFilter === "rate_limited"}
+            onClick={() => {
+              setStatusFilter((prev) => (prev === "rate_limited" ? "all" : "rate_limited"));
+              setPage(1);
+            }}
+          />
+          <CompactStat
+            label="异常"
+            value={summary.abnormal}
+            tone="danger"
+            active={statusFilter === "abnormal"}
+            onClick={() => {
+              setStatusFilter((prev) => (prev === "abnormal" ? "all" : "abnormal"));
+              setPage(1);
+            }}
+          />
+          <CompactStat
+            label="Go 订阅"
+            value={goCount}
+            tone="neutral"
+            active={modeFilter === "go"}
+            onClick={() => {
+              setModeFilter((prev) => (prev === "go" ? "all" : "go"));
+              setPage(1);
+            }}
+          />
+          <CompactStat
+            label="Zen 按量"
+            value={zenCount}
+            tone="neutral"
+            active={modeFilter === "zen"}
+            onClick={() => {
+              setModeFilter((prev) => (prev === "zen" ? "all" : "zen"));
+              setPage(1);
+            }}
+          />
         </div>
       )}
 
@@ -790,30 +1027,18 @@ export default function OpenCodeAccounts({ headerSlot }: { headerSlot?: ReactNod
               />
             </div>
 
-            <div className="inline-flex rounded-md border border-border bg-muted/40 p-0.5 text-xs">
-              {(
-                [
-                  ["all", `全部 (${summary?.total ?? total})`],
-                  ["go", `Go 订阅 (${goCount})`],
-                  ["zen", `Zen 按量 (${zenCount})`],
-                ] as const
-              ).map(([key, label]) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => {
-                    setModeFilter(key);
-                    setPage(1);
-                  }}
-                  className={cn(
-                    "rounded px-2.5 py-1 font-medium transition-colors",
-                    modeFilter === key ? "bg-background text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
+            <FilterChipBar
+              value={modeFilter}
+              onChange={(next) => {
+                setModeFilter(next);
+                setPage(1);
+              }}
+              options={[
+                { value: "all", label: "全部", count: summary?.total ?? total },
+                { value: "go", label: "Go 订阅", count: goCount, dotClassName: "bg-emerald-500" },
+                { value: "zen", label: "Zen 按量", count: zenCount, dotClassName: "bg-sky-500" },
+              ]}
+            />
 
             <Select
               value={statusFilter}
@@ -1058,136 +1283,312 @@ export default function OpenCodeAccounts({ headerSlot }: { headerSlot?: ReactNod
         onClose={() => {
           if (!addSubmitting) setShowAddModal(false);
         }}
-        title="添加 OpenCode 账号"
-        contentClassName="sm:max-w-2xl"
-      >
-        <div className="space-y-4">
-          <div className="inline-flex rounded-lg border border-border bg-muted/40 p-0.5 text-xs">
-            <button
-              type="button"
-              onClick={() => setAddTab("single")}
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium",
-                addTab === "single" ? "bg-background text-foreground shadow-xs" : "text-muted-foreground",
-              )}
-            >
-              <KeyRound className="size-3.5" /> 单个添加
-            </button>
-            <button
-              type="button"
-              onClick={() => setAddTab("import")}
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium",
-                addTab === "import" ? "bg-background text-foreground shadow-xs" : "text-muted-foreground",
-              )}
-            >
-              <Upload className="size-3.5" /> 批量导入 / Sub2API JSON
-            </button>
-          </div>
-
-          {addTab === "single" ? (
-            <div className="space-y-3">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1 block text-xs font-medium">接入模式</label>
-                  <Select value={addMode} onValueChange={(v) => setAddMode(v as OpenCodeMode)} options={MODE_OPTIONS} />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-medium">名称（可选）</label>
-                  <Input value={addName} onChange={(e) => setAddName(e.target.value)} placeholder="默认按模式与 Key 后缀生成" className="h-9 text-xs" />
-                </div>
-              </div>
-
-              <div>
-                <label className="mb-1 block text-xs font-medium">API Key *</label>
-                <Input
-                  type="password"
-                  value={addAPIKey}
-                  onChange={(e) => setAddAPIKey(e.target.value)}
-                  placeholder="sk-..."
-                  className="h-9 font-mono text-xs"
-                />
-              </div>
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1 block text-xs font-medium">自定义 Base URL（可选）</label>
-                  <Input
-                    value={addBaseURL}
-                    onChange={(e) => setAddBaseURL(e.target.value)}
-                    placeholder={addMode === "zen" ? DEFAULT_ZEN_BASE_URL : DEFAULT_GO_BASE_URL}
-                    className="h-9 font-mono text-xs"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-medium">Anthropic Base URL（可选）</label>
-                  <Input
-                    value={addAnthropicBaseURL}
-                    onChange={(e) => setAddAnthropicBaseURL(e.target.value)}
-                    placeholder={addMode === "zen" ? DEFAULT_ZEN_ANTHROPIC_URL : DEFAULT_GO_ANTHROPIC_URL}
-                    className="h-9 font-mono text-xs"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1 block text-xs font-medium">备注邮箱（可选）</label>
-                  <Input value={addEmail} onChange={(e) => setAddEmail(e.target.value)} placeholder="user@example.com" className="h-9 text-xs" />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-medium">代理（可选）</label>
-                  <ProxyField value={addProxyURL} onChange={setAddProxyURL} proxies={proxies} />
-                </div>
-              </div>
-
-              <div>
-                <label className="mb-1 block text-xs font-medium">模型白名单（留空则使用同步目录/默认目录）</label>
-                <ChipInput value={addModels} onChange={setAddModels} placeholder="输入模型名后回车，例如 glm-5.3" />
-              </div>
-
-              <ProtocolRulesEditor mode={addMode} rules={addProtocolRules} onChange={setAddProtocolRules} />
-
-              <div>
-                <label className="mb-1 block text-xs font-medium">自定义请求头 JSON（可选，支持覆盖 User-Agent）</label>
-                <Input
-                  value={addCustomHeadersText}
-                  onChange={(e) => setAddCustomHeadersText(e.target.value)}
-                  placeholder='{"User-Agent": "opencode/1.19.6"}'
-                  className="h-9 font-mono text-xs"
-                />
-              </div>
-
-              <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
-                <span className="text-xs text-muted-foreground">添加时立即拉取模型列表{addMode === "go" ? "与 Go 额度快照" : ""}</span>
-                <Switch checked={addAutoSync} onCheckedChange={setAddAutoSync} />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <Button variant="outline" size="sm" disabled={addSubmitting} onClick={() => setShowAddModal(false)}>
-                  取消
-                </Button>
+        title={
+          <span className="inline-flex items-center gap-2.5">
+            <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg border border-border/80 bg-muted/50 shadow-2xs">
+              <ChannelLogo channel="opencode" size={16} />
+            </span>
+            <span>添加 OpenCode 账号</span>
+          </span>
+        }
+        contentClassName="sm:max-w-[680px]"
+        bodyClassName="space-y-4 py-4"
+        footer={
+          <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <label className="flex cursor-pointer items-center gap-2.5 select-none">
+              <Switch
+                checked={addTab === "single" ? addAutoSync : importAutoSync}
+                onCheckedChange={(checked) => {
+                  if (addTab === "single") setAddAutoSync(checked);
+                  else setImportAutoSync(checked);
+                }}
+                disabled={addSubmitting}
+              />
+              <span className="text-xs text-muted-foreground">
+                {addTab === "single"
+                  ? `添加时立即同步模型${addMode === "go" ? "与 Go 额度" : ""}`
+                  : "导入时立即同步模型与 Go 额度"}
+              </span>
+            </label>
+            <div className="flex items-center justify-end gap-2">
+              <Button variant="outline" size="sm" disabled={addSubmitting} onClick={() => setShowAddModal(false)}>
+                取消
+              </Button>
+              {addTab === "single" ? (
                 <Button size="sm" disabled={addSubmitting} onClick={() => void handleAddSingle()}>
                   {addSubmitting ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : null}
                   保存并添加
                 </Button>
-              </div>
+              ) : (
+                <Button size="sm" disabled={addSubmitting} onClick={() => void handleBatchImport()}>
+                  {addSubmitting ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : null}
+                  开始导入
+                </Button>
+              )}
             </div>
-          ) : (
-            <div className="space-y-3">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1 block text-xs font-medium">默认模式（JSON 未指定时）</label>
-                  <Select value={importMode} onValueChange={(v) => setImportMode(v as OpenCodeMode)} options={MODE_OPTIONS} />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-medium">默认代理（可选）</label>
-                  <ProxyField value={importProxyURL} onChange={setImportProxyURL} proxies={proxies} />
-                </div>
+          </div>
+        }
+      >
+        <SegmentedTabs
+          size="sm"
+          className="w-full"
+          value={addTab}
+          onValueChange={(value) => setAddTab(value as "single" | "import")}
+          tabs={[
+            {
+              value: "single",
+              label: (
+                <>
+                  <KeyRound className="size-3.5" />
+                  <span>单个添加</span>
+                </>
+              ),
+            },
+            {
+              value: "import",
+              label: (
+                <>
+                  <Upload className="size-3.5" />
+                  <span>批量导入 / Sub2API JSON</span>
+                </>
+              ),
+            },
+          ]}
+        />
+
+        {addTab === "single" ? (
+          <div className="space-y-4">
+            {/* 基础凭据 */}
+            <section className="space-y-3.5 rounded-xl border border-border/75 bg-card p-4 shadow-2xs">
+              <div>
+                <FieldLabel>接入模式</FieldLabel>
+                <OpenCodeModeCards value={addMode} onChange={setAddMode} disabled={addSubmitting} />
               </div>
 
               <div>
-                <label className="mb-1 block text-xs font-medium">默认 Base URL（可选）</label>
+                <FieldLabel required hint="支持 OpenCode Go / Zen Key">
+                  API Key
+                </FieldLabel>
+                <div className="relative">
+                  <Input
+                    type={showAddAPIKey ? "text" : "password"}
+                    value={addAPIKey}
+                    onChange={(e) => setAddAPIKey(e.target.value)}
+                    placeholder="sk-..."
+                    autoComplete="off"
+                    className="h-9 pr-9 font-mono text-xs"
+                  />
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    onClick={() => setShowAddAPIKey((prev) => !prev)}
+                    aria-label={showAddAPIKey ? "隐藏 API Key" : "显示 API Key"}
+                    className="absolute inset-y-0 right-0 flex w-9 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    {showAddAPIKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <FieldLabel optional>名称</FieldLabel>
+                  <Input
+                    value={addName}
+                    onChange={(e) => setAddName(e.target.value)}
+                    placeholder="默认按模式与 Key 后缀生成"
+                    className="h-9 text-xs"
+                  />
+                </div>
+                <div>
+                  <FieldLabel optional>备注邮箱</FieldLabel>
+                  <Input
+                    value={addEmail}
+                    onChange={(e) => setAddEmail(e.target.value)}
+                    placeholder="user@example.com"
+                    className="h-9 text-xs"
+                  />
+                </div>
+              </div>
+            </section>
+
+            {/* 网络代理 */}
+            <section className="space-y-2.5 rounded-xl border border-border/75 bg-card p-4 shadow-2xs">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+                  <Globe className="size-3.5 text-muted-foreground" />
+                  <span>网络代理</span>
+                  <span className="font-normal text-muted-foreground/80">可选</span>
+                </div>
+                <span className="text-[11px] text-muted-foreground">可手填测试或直接从代理池绑定</span>
+              </div>
+              <ProxyField value={addProxyURL} onChange={setAddProxyURL} proxies={proxies} label="" />
+            </section>
+
+            {/* 高级配置（可折叠） */}
+            <section className="overflow-hidden rounded-xl border border-border/75 bg-card shadow-2xs">
+              <button
+                type="button"
+                onClick={() => setShowAddAdvanced((prev) => !prev)}
+                aria-expanded={showAddAdvanced}
+                className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/30"
+              >
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <SlidersHorizontal className="size-3.5 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-semibold text-foreground">高级配置</span>
+                      {addAdvancedCount > 0 ? (
+                        <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                          已自定义 {addAdvancedCount} 项
+                        </span>
+                      ) : (
+                        <span className="text-[11px] text-muted-foreground">
+                          Base URL、模型白名单、协议路由、自定义请求头
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <ChevronDown
+                  className={cn(
+                    "size-4 shrink-0 text-muted-foreground transition-transform duration-200",
+                    showAddAdvanced && "rotate-180",
+                  )}
+                />
+              </button>
+
+              {showAddAdvanced && (
+                <div className="space-y-4 border-t border-border/70 bg-muted/10 px-4 py-4">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div>
+                      <FieldLabel optional>自定义 Base URL</FieldLabel>
+                      <Input
+                        value={addBaseURL}
+                        onChange={(e) => setAddBaseURL(e.target.value)}
+                        placeholder={addMode === "zen" ? DEFAULT_ZEN_BASE_URL : DEFAULT_GO_BASE_URL}
+                        className="h-9 font-mono text-xs"
+                      />
+                    </div>
+                    <div>
+                      <FieldLabel optional>Anthropic Base URL</FieldLabel>
+                      <Input
+                        value={addAnthropicBaseURL}
+                        onChange={(e) => setAddAnthropicBaseURL(e.target.value)}
+                        placeholder={addMode === "zen" ? DEFAULT_ZEN_ANTHROPIC_URL : DEFAULT_GO_ANTHROPIC_URL}
+                        className="h-9 font-mono text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <FieldLabel optional hint="留空则使用同步目录/默认目录">
+                      模型白名单
+                    </FieldLabel>
+                    <ChipInput value={addModels} onChange={setAddModels} placeholder="输入模型名后回车，例如 glm-5.3" />
+                  </div>
+
+                  <ProtocolRulesEditor mode={addMode} rules={addProtocolRules} onChange={setAddProtocolRules} />
+
+                  <div>
+                    <FieldLabel optional hint="JSON 对象，支持覆盖 User-Agent">
+                      自定义请求头
+                    </FieldLabel>
+                    <Input
+                      value={addCustomHeadersText}
+                      onChange={(e) => setAddCustomHeadersText(e.target.value)}
+                      placeholder='{"User-Agent": "opencode/1.19.6"}'
+                      aria-invalid={Boolean(addHeaderError)}
+                      className="h-9 font-mono text-xs"
+                    />
+                    {addHeaderError ? (
+                      <p className="mt-1 text-[11px] text-destructive">{addHeaderError}</p>
+                    ) : null}
+                  </div>
+                </div>
+              )}
+            </section>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {/* 默认接入模式 */}
+            <section className="space-y-2.5 rounded-xl border border-border/75 bg-card p-4 shadow-2xs">
+              <FieldLabel hint="JSON 条目未指定模式时生效">默认接入模式</FieldLabel>
+              <OpenCodeModeCards value={importMode} onChange={setImportMode} disabled={addSubmitting} />
+            </section>
+
+            {/* 导入内容 */}
+            <section className="space-y-2.5 rounded-xl border border-border/75 bg-card p-4 shadow-2xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs font-semibold text-foreground">导入内容</label>
+                  {importSummary ? (
+                    <span className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 font-mono text-[10px] font-medium text-muted-foreground">
+                      {importSummary}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    ref={importFileRef}
+                    type="file"
+                    accept=".json,.txt"
+                    className="hidden"
+                    onChange={(e) => void handleImportFileChange(e)}
+                  />
+                  {importContent.trim() ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+                      onClick={() => setImportContent("")}
+                    >
+                      清空
+                    </Button>
+                  ) : null}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2.5 text-xs"
+                    onClick={() => importFileRef.current?.click()}
+                  >
+                    <FolderOpen className="mr-1.5 size-3.5" /> 选择文件
+                  </Button>
+                </div>
+              </div>
+
+              <textarea
+                value={importContent}
+                onChange={(e) => setImportContent(e.target.value)}
+                className={TEXTAREA_CLASS}
+                placeholder={`粘贴 API Key 列表或导出的 JSON 内容…\n\n示例：\nsk-xxxxxxxx\n账号A,sk-yyyyyyyy`}
+              />
+
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                <span className="text-muted-foreground/80">支持格式：</span>
+                <span className="rounded-md border border-border/60 bg-muted/40 px-2 py-0.5">每行 Key 或 名称,Key</span>
+                <span className="rounded-md border border-border/60 bg-muted/40 px-2 py-0.5">OpenCode 导出 JSON</span>
+                <span className="rounded-md border border-border/60 bg-muted/40 px-2 py-0.5">
+                  Sub2API JSON (<code className="font-mono text-[10px]">opencode_go</code>)
+                </span>
+              </div>
+            </section>
+
+            {/* 默认代理与端点 */}
+            <section className="space-y-3.5 rounded-xl border border-border/75 bg-card p-4 shadow-2xs">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+                  <Globe className="size-3.5 text-muted-foreground" />
+                  <span>默认代理与端点</span>
+                  <span className="font-normal text-muted-foreground/80">可选</span>
+                </div>
+                <span className="text-[11px] text-muted-foreground">导入项未单独指定时回落</span>
+              </div>
+              <ProxyField value={importProxyURL} onChange={setImportProxyURL} proxies={proxies} label="" />
+              <div>
+                <FieldLabel optional>默认 Base URL</FieldLabel>
                 <Input
                   value={importBaseURL}
                   onChange={(e) => setImportBaseURL(e.target.value)}
@@ -1195,48 +1596,9 @@ export default function OpenCodeAccounts({ headerSlot }: { headerSlot?: ReactNod
                   className="h-9 font-mono text-xs"
                 />
               </div>
-
-              <div>
-                <div className="mb-1 flex items-center justify-between">
-                  <label className="text-xs font-medium">导入内容</label>
-                  <div>
-                    <input
-                      ref={importFileRef}
-                      type="file"
-                      accept=".json,.txt"
-                      className="hidden"
-                      onChange={(e) => void handleImportFileChange(e)}
-                    />
-                    <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => importFileRef.current?.click()}>
-                      <FolderOpen className="mr-1 size-3" /> 选择文件
-                    </Button>
-                  </div>
-                </div>
-                <textarea
-                  value={importContent}
-                  onChange={(e) => setImportContent(e.target.value)}
-                  className={TEXTAREA_CLASS}
-                  placeholder={`支持以下格式：\n1. 每行一个 API Key 或 "名称,API Key"\n2. OpenCode 导出的 JSON 数组或对象\n3. Sub2API 导出的 JSON（自动提取 platform=opencode_go 条目）`}
-                />
-              </div>
-
-              <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
-                <span className="text-xs text-muted-foreground">导入时立即同步模型与 Go 额度</span>
-                <Switch checked={importAutoSync} onCheckedChange={setImportAutoSync} />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <Button variant="outline" size="sm" disabled={addSubmitting} onClick={() => setShowAddModal(false)}>
-                  取消
-                </Button>
-                <Button size="sm" disabled={addSubmitting} onClick={() => void handleBatchImport()}>
-                  {addSubmitting ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : null}
-                  开始导入
-                </Button>
-              </div>
-            </div>
-          )}
-        </div>
+            </section>
+          </div>
+        )}
       </Modal>
 
       {/* 编辑弹窗 */}
@@ -1245,99 +1607,156 @@ export default function OpenCodeAccounts({ headerSlot }: { headerSlot?: ReactNod
         onClose={() => {
           if (!editSaving) setEditingAccount(null);
         }}
-        title={editingAccount ? `编辑 OpenCode 账号：${accountLabel(editingAccount)}` : "编辑账号"}
-        contentClassName="sm:max-w-2xl"
+        title={
+          <span className="inline-flex items-center gap-2.5">
+            <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg border border-border/80 bg-muted/50 shadow-2xs">
+              <ChannelLogo channel="opencode" size={16} />
+            </span>
+            <span className="truncate">
+              {editingAccount ? `编辑 OpenCode 账号：${accountLabel(editingAccount)}` : "编辑账号"}
+            </span>
+          </span>
+        }
+        contentClassName="sm:max-w-[680px]"
+        bodyClassName="space-y-4 py-4"
+        footer={
+          !editLoading ? (
+            <div className="flex w-full justify-end gap-2">
+              <Button variant="outline" size="sm" disabled={editSaving} onClick={() => setEditingAccount(null)}>
+                取消
+              </Button>
+              <Button size="sm" disabled={editSaving} onClick={() => void handleSaveEdit()}>
+                {editSaving ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : null}
+                保存修改
+              </Button>
+            </div>
+          ) : undefined
+        }
       >
         {editLoading ? (
-          <div className="flex items-center justify-center py-10 text-sm text-muted-foreground">
+          <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
             <Loader2 className="mr-2 size-4 animate-spin" /> 正在加载配置…
           </div>
         ) : (
-          <div className="space-y-3">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="space-y-4">
+            <section className="space-y-3.5 rounded-xl border border-border/75 bg-card p-4 shadow-2xs">
               <div>
-                <label className="mb-1 block text-xs font-medium">接入模式</label>
-                <Select value={editMode} onValueChange={(v) => setEditMode(v as OpenCodeMode)} options={MODE_OPTIONS} />
+                <FieldLabel>接入模式</FieldLabel>
+                <OpenCodeModeCards value={editMode} onChange={setEditMode} disabled={editSaving} />
               </div>
-              <div>
-                <label className="mb-1 block text-xs font-medium">名称</label>
-                <Input value={editName} onChange={(e) => setEditName(e.target.value)} className="h-9 text-xs" />
-              </div>
-            </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <FieldLabel>名称</FieldLabel>
+                  <Input value={editName} onChange={(e) => setEditName(e.target.value)} className="h-9 text-xs" />
+                </div>
+                <div>
+                  <FieldLabel optional>备注邮箱</FieldLabel>
+                  <Input value={editEmail} onChange={(e) => setEditEmail(e.target.value)} className="h-9 text-xs" />
+                </div>
+              </div>
+
               <div>
-                <label className="mb-1 block text-xs font-medium">更换 API Key（留空保持不变）</label>
+                <FieldLabel optional hint="留空保持当前 Key 不变">
+                  更换 API Key
+                </FieldLabel>
+                <div className="relative">
+                  <Input
+                    type={showEditAPIKey ? "text" : "password"}
+                    value={editAPIKey}
+                    onChange={(e) => setEditAPIKey(e.target.value)}
+                    placeholder="留空不修改"
+                    autoComplete="off"
+                    className="h-9 pr-9 font-mono text-xs"
+                  />
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    onClick={() => setShowEditAPIKey((prev) => !prev)}
+                    aria-label={showEditAPIKey ? "隐藏 API Key" : "显示 API Key"}
+                    className="absolute inset-y-0 right-0 flex w-9 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    {showEditAPIKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            <section className="space-y-3.5 rounded-xl border border-border/75 bg-card p-4 shadow-2xs">
+              <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+                <Globe className="size-3.5 text-muted-foreground" />
+                <span>端点与代理</span>
+              </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <FieldLabel optional hint="留空使用官方默认">
+                    Base URL
+                  </FieldLabel>
+                  <Input
+                    value={editBaseURL}
+                    onChange={(e) => setEditBaseURL(e.target.value)}
+                    placeholder={editMode === "zen" ? DEFAULT_ZEN_BASE_URL : DEFAULT_GO_BASE_URL}
+                    className="h-9 font-mono text-xs"
+                  />
+                </div>
+                <div>
+                  <FieldLabel optional>Anthropic Base URL</FieldLabel>
+                  <Input
+                    value={editAnthropicBaseURL}
+                    onChange={(e) => setEditAnthropicBaseURL(e.target.value)}
+                    placeholder={editMode === "zen" ? DEFAULT_ZEN_ANTHROPIC_URL : DEFAULT_GO_ANTHROPIC_URL}
+                    className="h-9 font-mono text-xs"
+                  />
+                </div>
+              </div>
+              <ProxyField value={editProxyURL} onChange={setEditProxyURL} proxies={proxies} label="" />
+            </section>
+
+            <section className="space-y-3.5 rounded-xl border border-border/75 bg-card p-4 shadow-2xs">
+              <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+                <SlidersHorizontal className="size-3.5 text-muted-foreground" />
+                <span>模型、路由与请求头</span>
+              </div>
+
+              <div>
+                <FieldLabel optional hint="留空则按同步目录放行">
+                  模型白名单
+                </FieldLabel>
+                <ChipInput value={editModels} onChange={setEditModels} placeholder="输入模型名后回车" />
+              </div>
+
+              <div>
+                <FieldLabel optional hint="JSON 对象">
+                  账号级模型映射
+                </FieldLabel>
                 <Input
-                  type="password"
-                  value={editAPIKey}
-                  onChange={(e) => setEditAPIKey(e.target.value)}
-                  placeholder="留空不修改"
+                  value={editModelMapping}
+                  onChange={(e) => setEditModelMapping(e.target.value)}
+                  placeholder='{"gpt-4o": "glm-5.3"}'
                   className="h-9 font-mono text-xs"
                 />
               </div>
-              <div>
-                <label className="mb-1 block text-xs font-medium">备注邮箱</label>
-                <Input value={editEmail} onChange={(e) => setEditEmail(e.target.value)} className="h-9 text-xs" />
-              </div>
-            </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <ProtocolRulesEditor mode={editMode} rules={editProtocolRules} onChange={setEditProtocolRules} />
+
               <div>
-                <label className="mb-1 block text-xs font-medium">Base URL（留空使用官方默认）</label>
-                <Input
-                  value={editBaseURL}
-                  onChange={(e) => setEditBaseURL(e.target.value)}
-                  placeholder={editMode === "zen" ? DEFAULT_ZEN_BASE_URL : DEFAULT_GO_BASE_URL}
-                  className="h-9 font-mono text-xs"
+                <FieldLabel optional hint="JSON 对象">
+                  自定义请求头
+                </FieldLabel>
+                <textarea
+                  value={editCustomHeadersText}
+                  onChange={(e) => setEditCustomHeadersText(e.target.value)}
+                  aria-invalid={Boolean(editHeaderError)}
+                  className="flex min-h-[76px] w-full resize-y rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs leading-relaxed shadow-2xs transition-colors focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30"
+                  placeholder='{"User-Agent": "opencode/1.19.6"}'
                 />
+                {editHeaderError ? <p className="mt-1 text-[11px] text-destructive">{editHeaderError}</p> : null}
               </div>
+            </section>
+
+            <section className="grid grid-cols-1 gap-3 rounded-xl border border-border/75 bg-card p-4 shadow-2xs sm:grid-cols-2">
               <div>
-                <label className="mb-1 block text-xs font-medium">Anthropic Base URL（可选）</label>
-                <Input
-                  value={editAnthropicBaseURL}
-                  onChange={(e) => setEditAnthropicBaseURL(e.target.value)}
-                  placeholder={editMode === "zen" ? DEFAULT_ZEN_ANTHROPIC_URL : DEFAULT_GO_ANTHROPIC_URL}
-                  className="h-9 font-mono text-xs"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="mb-1 block text-xs font-medium">代理</label>
-              <ProxyField value={editProxyURL} onChange={setEditProxyURL} proxies={proxies} />
-            </div>
-
-            <div>
-              <label className="mb-1 block text-xs font-medium">模型白名单（留空则按同步目录放行）</label>
-              <ChipInput value={editModels} onChange={setEditModels} placeholder="输入模型名后回车" />
-            </div>
-
-            <div>
-              <label className="mb-1 block text-xs font-medium">账号级模型映射 JSON（可选）</label>
-              <Input
-                value={editModelMapping}
-                onChange={(e) => setEditModelMapping(e.target.value)}
-                placeholder='{"gpt-4o": "glm-5.3"}'
-                className="h-9 font-mono text-xs"
-              />
-            </div>
-
-            <ProtocolRulesEditor mode={editMode} rules={editProtocolRules} onChange={setEditProtocolRules} />
-
-            <div>
-              <label className="mb-1 block text-xs font-medium">自定义请求头 JSON</label>
-              <textarea
-                value={editCustomHeadersText}
-                onChange={(e) => setEditCustomHeadersText(e.target.value)}
-                className="flex min-h-[72px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-xs"
-                placeholder='{"User-Agent": "opencode/1.19.6"}'
-              />
-            </div>
-
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div>
-                <label className="mb-1 block text-xs font-medium">所属分组</label>
+                <FieldLabel>所属分组</FieldLabel>
                 <AccountGroupMultiSelect
                   groups={openCodeGroups}
                   value={editGroupIDs}
@@ -1348,7 +1767,9 @@ export default function OpenCodeAccounts({ headerSlot }: { headerSlot?: ReactNod
                 />
               </div>
               <div>
-                <label className="mb-1 block text-xs font-medium">限定 API Keys（留空不限）</label>
+                <FieldLabel optional hint="留空不限">
+                  限定 API Keys
+                </FieldLabel>
                 <APIKeyMultiSelect
                   options={apiKeys}
                   value={editAllowedKeyIDs}
@@ -1361,17 +1782,7 @@ export default function OpenCodeAccounts({ headerSlot }: { headerSlot?: ReactNod
                   emptyHint="可先在 API Keys 页面创建"
                 />
               </div>
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2">
-              <Button variant="outline" size="sm" disabled={editSaving} onClick={() => setEditingAccount(null)}>
-                取消
-              </Button>
-              <Button size="sm" disabled={editSaving} onClick={() => void handleSaveEdit()}>
-                {editSaving ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : null}
-                保存修改
-              </Button>
-            </div>
+            </section>
           </div>
         )}
       </Modal>

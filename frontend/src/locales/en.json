@@ -210,6 +210,13 @@
     "theme": "Themes",
     "settings": "Settings",
     "console": "Console",
+    "group": {
+      "overview": "Overview",
+      "assets": "Assets & Routing",
+      "tools": "Testing & Governance",
+      "system": "System"
+    },
+    "quickSearch": "Quick search…",
     "proxies": "Proxies",
     "images": "Images",
     "promptFilter": "Prompt Filter",
@@ -775,6 +782,7 @@
     "switchToLight": "Switch to light mode",
     "themeStyle": "Theme Style",
     "theme": {
+      "studio": "Beautiful Studio",
       "default": "Classic Blue",
       "glass": "Frosted Glass",
       "claude": "Claude Warm",
@@ -4605,6 +4613,10 @@
       "glass": {
         "surface": "Frosted glass",
         "controls": "Lit pills"
+      },
+      "studio": {
+        "surface": "Layered shadows",
+        "controls": "Hairline rings"
       }
     },
     "title": "Theme Settings",
@@ -4643,6 +4655,7 @@
       "website": "Web classics"
     },
     "themeDesc": {
+      "studio": "OKLCH precision neutral surfaces inspired by Beautiful UI: soft layered shadows in light mode and crisp 1px light-edge rings in dark mode.",
       "default": "A stable blue accent for general admin use and default deployments.",
       "glass": "Taken from the theme switcher's milky glass and inset highlights: frosted cards, pill controls, amber by day and moonlight silver at night.",
       "claude": "A warm paper-like palette with softer cool tones and clear hierarchy.",

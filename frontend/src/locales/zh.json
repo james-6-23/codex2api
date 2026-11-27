@@ -210,6 +210,13 @@
     "theme": "主题设置",
     "settings": "系统设置",
     "console": "控制台",
+    "group": {
+      "overview": "总览与观测",
+      "assets": "资产与分发",
+      "tools": "测试与治理",
+      "system": "系统"
+    },
+    "quickSearch": "快速搜索…",
     "proxies": "代理管理",
     "images": "生图工作台",
     "promptFilter": "Prompt 检查",
@@ -775,6 +782,7 @@
     "switchToLight": "切换为浅色模式",
     "themeStyle": "主题风格",
     "theme": {
+      "studio": "Beautiful Studio",
       "default": "经典蓝",
       "glass": "霜玻璃",
       "claude": "Claude 暖杏",
@@ -4601,6 +4609,10 @@
       "glass": {
         "surface": "霜化玻璃",
         "controls": "胶囊高光"
+      },
+      "studio": {
+        "surface": "细腻多层投影",
+        "controls": "暗色微高光边"
       }
     },
     "title": "主题设置",
@@ -4639,6 +4651,7 @@
       "website": "经典网站"
     },
     "themeDesc": {
+      "studio": "借鉴 Beautiful UI 的 OKLCH 精密中性灰阶：浅色通透柔影，深色配 1px 微高光细环，克制而高级。",
       "default": "稳重的蓝色主色，适合通用后台和默认部署。",
       "glass": "取自明暗开关的乳白玻璃与内凹高光：半透明卡片、胶囊控件，浅色用琥珀点缀，深色转成夜空银辉。",
       "claude": "暖色纸张质感，弱化冷色并保留清晰层级。",

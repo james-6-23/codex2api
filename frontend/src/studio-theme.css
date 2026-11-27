@@ -1,0 +1,199 @@
+/* Beautiful Studio foundation — adapted from beautifului.dev (MIT):
+ * OKLCH cool-neutral surface hierarchy, layered low-alpha shadows,
+ * crisp 1px hairline rings in dark mode, and tactile motion curves. */
+
+:root {
+  --bui-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --bui-ease-snappy: cubic-bezier(0.16, 1, 0.3, 1);
+  --bui-shadow-card:
+    0 0 0 1px color-mix(in oklab, var(--color-foreground) 5%, transparent),
+    0 1px 2px color-mix(in oklab, var(--color-foreground) 4%, transparent),
+    0 4px 12px color-mix(in oklab, var(--color-foreground) 3%, transparent);
+  --bui-shadow-raised:
+    0 0 0 1px color-mix(in oklab, var(--color-foreground) 7%, transparent),
+    0 4px 12px color-mix(in oklab, var(--color-foreground) 6%, transparent),
+    0 14px 28px color-mix(in oklab, var(--color-foreground) 4%, transparent);
+  --bui-shadow-overlay:
+    0 0 0 1px color-mix(in oklab, var(--color-foreground) 8%, transparent),
+    0 8px 24px color-mix(in oklab, var(--color-foreground) 10%, transparent),
+    0 24px 56px color-mix(in oklab, var(--color-foreground) 8%, transparent);
+}
+
+.dark {
+  --bui-shadow-card:
+    0 0 0 1px oklch(1 0 0 / 0.08),
+    inset 0 1px 0 oklch(1 0 0 / 0.05),
+    0 4px 16px oklch(0 0 0 / 0.28);
+  --bui-shadow-raised:
+    0 0 0 1px oklch(1 0 0 / 0.11),
+    inset 0 1px 0 oklch(1 0 0 / 0.07),
+    0 10px 28px oklch(0 0 0 / 0.38);
+  --bui-shadow-overlay:
+    0 0 0 1px oklch(1 0 0 / 0.13),
+    inset 0 1px 0 oklch(1 0 0 / 0.08),
+    0 18px 48px oklch(0 0 0 / 0.56);
+}
+
+@layer base {
+  /* Beautiful Studio — Light */
+  :root.theme-studio {
+    --color-background: oklch(0.966 0.002 252);
+    --color-foreground: oklch(0.247 0.006 258.361);
+    --color-card: oklch(1 0 0);
+    --color-card-foreground: oklch(0.247 0.006 258.361);
+    --color-popover: oklch(1 0 0);
+    --color-popover-foreground: oklch(0.247 0.006 258.361);
+    --color-primary: oklch(0.585 0.205 254.947);
+    --color-primary-foreground: oklch(0.99 0 0);
+    --color-secondary: oklch(0.942 0.003 252);
+    --color-secondary-foreground: oklch(0.28 0.006 258);
+    --color-muted: oklch(0.946 0.003 252);
+    --color-muted-foreground: oklch(0.506 0.01 264.477);
+    --color-accent: oklch(0.942 0.016 254);
+    --color-accent-foreground: oklch(0.247 0.006 258.361);
+    --color-destructive: oklch(0.577 0.215 27.325);
+    --color-destructive-foreground: oklch(0.99 0 0);
+    --color-border: oklch(0.892 0.004 258);
+    --color-input: oklch(0.885 0.004 258);
+    --color-ring: oklch(0.585 0.205 254.947);
+    --sidebar-background: 240 20% 99%;
+    --website-nav-foreground: oklch(0.247 0.006 258.361);
+    --website-nav-background: oklch(0.935 0.006 255);
+    --website-link: oklch(0.54 0.205 254.947);
+    --website-card-radius: 12px;
+    --website-button-radius: 8px;
+    --website-field-radius: 8px;
+    --website-nav-radius: 8px;
+    --website-card-shadow:
+      0 0 0 1px oklch(0.247 0.006 258 / 0.05),
+      0 1px 2px oklch(0.247 0.006 258 / 0.04),
+      0 6px 16px oklch(0.247 0.006 258 / 0.03);
+    --website-button-weight: 500;
+    --website-nav-weight: 500;
+    --website-nav-size: 13.5px;
+  }
+
+  /* Beautiful Studio — Dark */
+  :root.dark.theme-studio {
+    --color-background: oklch(0.195 0.004 264.5);
+    --color-foreground: oklch(0.964 0.002 247.839);
+    --color-card: oklch(0.238 0.005 268);
+    --color-card-foreground: oklch(0.964 0.002 247.839);
+    --color-popover: oklch(0.252 0.006 268);
+    --color-popover-foreground: oklch(0.964 0.002 247.839);
+    --color-primary: oklch(0.68 0.173 253.301);
+    --color-primary-foreground: oklch(0.16 0.01 260);
+    --color-secondary: oklch(0.285 0.006 266);
+    --color-secondary-foreground: oklch(0.9 0.004 250);
+    --color-muted: oklch(0.275 0.006 266);
+    --color-muted-foreground: oklch(0.715 0.008 260.731);
+    --color-accent: oklch(0.305 0.02 258);
+    --color-accent-foreground: oklch(0.964 0.002 247.839);
+    --color-destructive: oklch(0.64 0.2 25);
+    --color-destructive-foreground: oklch(0.98 0 0);
+    --color-border: oklch(1 0 0 / 0.11);
+    --color-input: oklch(1 0 0 / 0.13);
+    --color-ring: oklch(0.68 0.173 253.301);
+    --sidebar-background: 240 8% 12%;
+    --website-nav-foreground: oklch(0.964 0.002 247.839);
+    --website-nav-background: oklch(1 0 0 / 0.08);
+    --website-link: oklch(0.72 0.165 253.301);
+    --website-card-shadow:
+      0 0 0 1px oklch(1 0 0 / 0.07),
+      inset 0 1px 0 oklch(1 0 0 / 0.05),
+      0 8px 24px oklch(0 0 0 / 0.32);
+  }
+}
+
+/* Studio-specific precision accents */
+:root.theme-studio {
+  [data-slot='admin-sidebar'] {
+    box-shadow: inset -1px 0 0 color-mix(in oklab, var(--color-border) 80%, transparent);
+  }
+
+  [data-slot='dialog-content'] {
+    box-shadow: var(--bui-shadow-overlay);
+  }
+
+  [data-slot='button'][data-variant='default'] {
+    box-shadow:
+      inset 0 1px 0 oklch(1 0 0 / 0.18),
+      0 1px 2px oklch(0 0 0 / 0.12);
+  }
+
+  [data-slot='button'][data-variant='outline'] {
+    box-shadow: 0 1px 2px color-mix(in oklab, var(--color-foreground) 5%, transparent);
+  }
+
+  &.dark [data-slot='button'][data-variant='outline'] {
+    box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.06), 0 1px 2px oklch(0 0 0 / 0.25);
+  }
+}
+
+.appearance-thumbnail[data-ui='studio'] {
+  --website-card-radius: 10px;
+  --website-button-radius: 7px;
+  --website-nav-radius: 7px;
+  --website-card-shadow: 0 0 0 1px oklch(0.247 0.006 258 / 0.07), 0 4px 12px oklch(0.247 0.006 258 / 0.06);
+}
+
+/* PixelLoader matrix pulse */
+@keyframes bui-pixel-on {
+  0%, 100% {
+    opacity: 0.22;
+    transform: scale(0.84);
+  }
+  35% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  65% {
+    opacity: 0.48;
+    transform: scale(0.92);
+  }
+}
+
+.bui-pixel-cell {
+  animation: bui-pixel-on 1.15s var(--bui-ease-out) infinite;
+  will-change: opacity, transform;
+}
+
+/* Shimmer text sweep */
+@keyframes bui-shimmer-sweep {
+  0% {
+    background-position: 160% 50%;
+  }
+  100% {
+    background-position: -60% 50%;
+  }
+}
+
+.bui-shimmer-text {
+  background-image: linear-gradient(
+    105deg,
+    color-mix(in oklab, var(--color-muted-foreground) 82%, transparent) 0%,
+    color-mix(in oklab, var(--color-muted-foreground) 82%, transparent) 38%,
+    var(--color-foreground) 50%,
+    color-mix(in oklab, var(--color-muted-foreground) 82%, transparent) 62%,
+    color-mix(in oklab, var(--color-muted-foreground) 82%, transparent) 100%
+  );
+  background-size: 240% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: bui-shimmer-sweep 2.2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bui-pixel-cell {
+    animation: none;
+    opacity: 0.72;
+    transform: none;
+  }
+
+  .bui-shimmer-text {
+    animation: none;
+    background-image: none;
+    color: var(--color-muted-foreground);
+  }
+}

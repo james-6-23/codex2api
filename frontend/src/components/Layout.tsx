@@ -1,7 +1,7 @@
 import { type CSSProperties, type PropsWithChildren, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { NavLink, useLocation } from 'react-router-dom'
-import { LayoutDashboard, Users, Activity, Settings, Server, Languages, Globe, BookOpen, KeyRound, Image as ImageIcon, ShieldAlert, ExternalLink, ChevronLeft, Palette, Sun, Moon, LogOut, Download, Loader2, RefreshCw, Menu, X, CircleDollarSign, Braces, FlaskConical, RadioTower } from 'lucide-react'
+import { LayoutDashboard, Users, Activity, Settings, Server, Languages, Globe, BookOpen, KeyRound, Image as ImageIcon, ShieldAlert, ExternalLink, ChevronLeft, Palette, Sun, Moon, LogOut, Download, Loader2, RefreshCw, Menu, X, CircleDollarSign, Braces, FlaskConical, RadioTower, Search } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { api, resetAdminAuthState } from '../api'
 import { isBrandingVideo, useBranding } from '../branding'
@@ -12,34 +12,49 @@ import { useToast } from '../hooks/useToast'
 import { getErrorMessage } from '../utils/error'
 import SecurityBanner from './SecurityBanner'
 import GrokImportProgressHost from './GrokImportProgressHost'
+import CommandPalette from './CommandPalette'
+import { GlideMenu } from '@/components/ui/beautiful'
 import { cn } from '@/lib/utils'
 import { CinematicThemeSwitcher } from '@/components/ui/cinematic-theme-switcher'
+
+type NavGroupId = 'overview' | 'assets' | 'tools' | 'system'
 
 type NavDef = {
   to: string
   labelKey: string
   icon: ReactNode
+  group: NavGroupId
   end?: boolean
   activePrefix?: string
 }
 
+const navGroups: readonly { id: NavGroupId; labelKey: string }[] = [
+  { id: 'overview', labelKey: 'nav.group.overview' },
+  { id: 'assets', labelKey: 'nav.group.assets' },
+  { id: 'tools', labelKey: 'nav.group.tools' },
+  { id: 'system', labelKey: 'nav.group.system' },
+]
+
 const navDefs: NavDef[] = [
-  { to: '/', labelKey: 'nav.dashboard', icon: <LayoutDashboard className="size-[18px]" />, end: true },
-  { to: '/accounts', labelKey: 'nav.accounts', icon: <Users className="size-[18px]" /> },
-  { to: '/api-keys', labelKey: 'nav.apiKeys', icon: <KeyRound className="size-[18px]" /> },
-  { to: '/proxies', labelKey: 'nav.proxies', icon: <Globe className="size-[18px]" /> },
-  { to: '/images/studio', labelKey: 'nav.images', icon: <ImageIcon className="size-[18px]" />, activePrefix: '/images' },
-  { to: '/intelligence-check', labelKey: 'nav.intelligenceCheck', icon: <FlaskConical className="size-[18px]" /> },
-  { to: '/quality-test', labelKey: 'nav.qualityTest', icon: <FlaskConical className="size-[18px]" /> },
-  { to: '/prompt-filter/overview', labelKey: 'nav.promptFilter', icon: <ShieldAlert className="size-[18px]" />, activePrefix: '/prompt-filter' },
-  { to: '/ops/overview', labelKey: 'nav.ops', icon: <Server className="size-[18px]" />, activePrefix: '/ops' },
-  { to: '/usage', labelKey: 'nav.usage', icon: <Activity className="size-[18px]" /> },
-  { to: '/channel-monitor', labelKey: 'nav.channelMonitor', icon: <RadioTower className="size-[18px]" /> },
-  { to: '/model-pricing', labelKey: 'nav.modelPricing', icon: <CircleDollarSign className="size-[18px]" /> },
-  { to: '/payload-rules/editor', labelKey: 'nav.payloadRules', icon: <Braces className="size-[18px]" />, activePrefix: '/payload-rules' },
-  { to: '/theme', labelKey: 'nav.theme', icon: <Palette className="size-[18px]" /> },
-  { to: '/settings', labelKey: 'nav.settings', icon: <Settings className="size-[18px]" /> },
-  { to: '/docs', labelKey: 'nav2.docs', icon: <BookOpen className="size-[18px]" /> },
+  { to: '/', labelKey: 'nav.dashboard', icon: <LayoutDashboard className="size-[17px] shrink-0" />, group: 'overview', end: true },
+  { to: '/usage', labelKey: 'nav.usage', icon: <Activity className="size-[17px] shrink-0" />, group: 'overview' },
+  { to: '/channel-monitor', labelKey: 'nav.channelMonitor', icon: <RadioTower className="size-[17px] shrink-0" />, group: 'overview' },
+  { to: '/ops/overview', labelKey: 'nav.ops', icon: <Server className="size-[17px] shrink-0" />, group: 'overview', activePrefix: '/ops' },
+
+  { to: '/accounts', labelKey: 'nav.accounts', icon: <Users className="size-[17px] shrink-0" />, group: 'assets' },
+  { to: '/api-keys', labelKey: 'nav.apiKeys', icon: <KeyRound className="size-[17px] shrink-0" />, group: 'assets' },
+  { to: '/proxies', labelKey: 'nav.proxies', icon: <Globe className="size-[17px] shrink-0" />, group: 'assets' },
+  { to: '/model-pricing', labelKey: 'nav.modelPricing', icon: <CircleDollarSign className="size-[17px] shrink-0" />, group: 'assets' },
+
+  { to: '/images/studio', labelKey: 'nav.images', icon: <ImageIcon className="size-[17px] shrink-0" />, group: 'tools', activePrefix: '/images' },
+  { to: '/intelligence-check', labelKey: 'nav.intelligenceCheck', icon: <FlaskConical className="size-[17px] shrink-0" />, group: 'tools' },
+  { to: '/quality-test', labelKey: 'nav.qualityTest', icon: <FlaskConical className="size-[17px] shrink-0" />, group: 'tools' },
+  { to: '/prompt-filter/overview', labelKey: 'nav.promptFilter', icon: <ShieldAlert className="size-[17px] shrink-0" />, group: 'tools', activePrefix: '/prompt-filter' },
+  { to: '/payload-rules/editor', labelKey: 'nav.payloadRules', icon: <Braces className="size-[17px] shrink-0" />, group: 'tools', activePrefix: '/payload-rules' },
+
+  { to: '/theme', labelKey: 'nav.theme', icon: <Palette className="size-[17px] shrink-0" />, group: 'system' },
+  { to: '/settings', labelKey: 'nav.settings', icon: <Settings className="size-[17px] shrink-0" />, group: 'system' },
+  { to: '/docs', labelKey: 'nav2.docs', icon: <BookOpen className="size-[17px] shrink-0" />, group: 'system' },
 ]
 
 // Explicit mobile primary order: dashboard → accounts → usage → ops.
@@ -75,6 +90,18 @@ export default function Layout({ children }: PropsWithChildren) {
     }
   })
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false)
+  const [commandOpen, setCommandOpen] = useState(false)
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setCommandOpen((prev) => !prev)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
   const toggleSidebarCollapsed = () => {
     setSidebarCollapsed((prev) => {
       const next = !prev
@@ -331,6 +358,11 @@ export default function Layout({ children }: PropsWithChildren) {
   return (
     <div className="relative min-h-dvh">
       <GrokImportProgressHost />
+      <CommandPalette
+        open={commandOpen}
+        onClose={() => setCommandOpen(false)}
+        onToggleLang={toggleLang}
+      />
       {backgroundImage ? (
         <div aria-hidden="true" className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
           {isBackgroundVideo ? (
@@ -488,79 +520,113 @@ export default function Layout({ children }: PropsWithChildren) {
               </div>
             </div>
 
-            {/* Collapse toggle: 嵌入 brand 与 nav 之间,展开态显示文字,收起态只显示箭头 */}
-            <button
-              type="button"
-              onClick={toggleSidebarCollapsed}
-              title={sidebarCollapsed ? t('common.expandSidebar') : t('common.collapseSidebar')}
-              aria-label={sidebarCollapsed ? t('common.expandSidebar') : t('common.collapseSidebar')}
-              className={`mt-3 flex items-center min-h-9 rounded-lg text-[12px] font-semibold text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-[background-color,color,padding] ${containerEase} ${
-                sidebarCollapsed ? 'justify-center px-2 py-2' : 'gap-2 px-3 py-2'
-              }`}
-            >
-              <ChevronLeft
-                className={`size-4 transition-transform ${containerEase} ${
-                  sidebarCollapsed ? 'rotate-180' : 'rotate-0'
-                }`}
-              />
-              <span
-                className={`overflow-hidden whitespace-nowrap transition-[max-width,opacity] ${textEase} ${textRevealDelay} ${
-                  sidebarCollapsed ? 'max-w-0 opacity-0' : 'max-w-[160px] opacity-100'
-                }`}
+            {/* Quick search (Cmd+K) & Collapse toggle */}
+            <div className={`mt-3 flex ${sidebarCollapsed ? 'flex-col items-center gap-1' : 'items-center gap-1.5'}`}>
+              <button
+                type="button"
+                onClick={() => setCommandOpen(true)}
+                title={`${t('nav.quickSearch')} (⌘K)`}
+                aria-label={t('nav.quickSearch')}
+                className={cn(
+                  'flex min-h-9 items-center rounded-lg border border-border/75 bg-background/70 text-[12px] text-muted-foreground shadow-2xs transition-[background-color,color,border-color,padding] hover:border-border hover:bg-background hover:text-foreground dark:bg-white/[0.03] dark:hover:bg-white/[0.06]',
+                  containerEase,
+                  sidebarCollapsed ? 'size-9 justify-center px-0' : 'min-w-0 flex-1 justify-between gap-2 px-2.5',
+                )}
               >
-                {t('common.collapseSidebar')}
-              </span>
-            </button>
-
-            {/* Nav */}
-            <nav className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pt-3 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" aria-label="Main navigation">
-              <span
-                className={`mb-1 overflow-hidden whitespace-nowrap px-2 text-[11px] font-bold uppercase text-muted-foreground transition-[max-height,opacity,margin] ${textEase} ${textRevealDelay} ${
-                  sidebarCollapsed ? 'mb-0 max-h-0 opacity-0' : 'max-h-5 opacity-100'
-                }`}
-                aria-hidden={sidebarCollapsed}
-              >
-                {t('nav.console')}
-              </span>
-              {navDefs.map((item) => {
-                const active = isNavActive(item)
-                const label = t(item.labelKey)
-                return (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    end={item.end}
-                    title={sidebarCollapsed ? label : undefined}
-                    className={cn(
-                      'relative flex min-h-10 items-center rounded-xl border text-[14px] font-semibold transition-[background-color,color,border-color,padding,gap]',
-                      containerEase,
-                      sidebarCollapsed ? 'justify-center px-2 py-2' : 'gap-2.5 px-3 py-2',
-                      active
-                        ? 'border-primary/20 bg-primary/10 text-primary'
-                        : 'border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground',
-                    )}
+                <span className="flex min-w-0 items-center gap-2">
+                  <Search className="size-3.5 shrink-0" />
+                  <span
+                    className={`truncate whitespace-nowrap transition-[max-width,opacity] ${textEase} ${textRevealDelay} ${
+                      sidebarCollapsed ? 'max-w-0 opacity-0' : 'max-w-[130px] opacity-100'
+                    }`}
                   >
-                    {active ? (
+                    {t('nav.quickSearch')}
+                  </span>
+                </span>
+                {!sidebarCollapsed ? (
+                  <kbd className="shrink-0 rounded border border-border/80 bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] leading-none text-muted-foreground">
+                    ⌘K
+                  </kbd>
+                ) : null}
+              </button>
+              <button
+                type="button"
+                onClick={toggleSidebarCollapsed}
+                title={sidebarCollapsed ? t('common.expandSidebar') : t('common.collapseSidebar')}
+                aria-label={sidebarCollapsed ? t('common.expandSidebar') : t('common.collapseSidebar')}
+                className="flex size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+              >
+                <ChevronLeft
+                  className={`size-4 transition-transform ${containerEase} ${
+                    sidebarCollapsed ? 'rotate-180' : 'rotate-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            {/* Grouped Gliding Nav */}
+            <GlideMenu
+              as="nav"
+              aria-label="Main navigation"
+              indicatorClassName="rounded-xl"
+              className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pt-3 pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            >
+              {navGroups.map((group, groupIndex) => {
+                const groupItems = navDefs.filter((item) => item.group === group.id)
+                return (
+                  <div key={group.id} className="flex flex-col gap-0.5">
+                    {sidebarCollapsed ? (
+                      groupIndex > 0 ? <div className="mx-2 my-1 h-px bg-border/60" aria-hidden="true" /> : null
+                    ) : (
                       <span
-                        aria-hidden
-                        className={cn(
-                          'absolute top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-primary',
-                          sidebarCollapsed ? 'left-1' : 'left-1.5',
-                        )}
-                      />
-                    ) : null}
-                    {item.icon}
-                    <span
-                      className={`overflow-hidden whitespace-nowrap transition-[max-width,opacity] ${textEase} ${textRevealDelay} ${
-                        sidebarCollapsed ? 'max-w-0 opacity-0' : 'max-w-[160px] opacity-100'
-                      }`}
-                    >
-                      {label}
-                    </span>
-                  </NavLink>
+                        className={`mb-1 overflow-hidden whitespace-nowrap px-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground/75 transition-[max-height,opacity] ${textEase} ${textRevealDelay}`}
+                      >
+                        {t(group.labelKey)}
+                      </span>
+                    )}
+                    {groupItems.map((item) => {
+                      const active = isNavActive(item)
+                      const label = t(item.labelKey)
+                      return (
+                        <NavLink
+                          key={item.to}
+                          to={item.to}
+                          end={item.end}
+                          data-glide-item="true"
+                          title={sidebarCollapsed ? label : undefined}
+                          className={cn(
+                            'relative z-10 flex min-h-9 items-center rounded-xl border text-[13.5px] font-medium transition-[color,border-color,padding,gap]',
+                            containerEase,
+                            sidebarCollapsed ? 'justify-center px-2 py-2' : 'gap-2.5 px-3 py-1.5',
+                            active
+                              ? 'border-primary/20 bg-primary/10 font-semibold text-primary'
+                              : 'border-transparent text-muted-foreground hover:text-foreground',
+                          )}
+                        >
+                          {active ? (
+                            <span
+                              aria-hidden="true"
+                              className={cn(
+                                'absolute top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-primary',
+                                sidebarCollapsed ? 'left-1' : 'left-1.5',
+                              )}
+                            />
+                          ) : null}
+                          {item.icon}
+                          <span
+                            className={`overflow-hidden whitespace-nowrap transition-[max-width,opacity] ${textEase} ${textRevealDelay} ${
+                              sidebarCollapsed ? 'max-w-0 opacity-0' : 'max-w-[160px] opacity-100'
+                            }`}
+                          >
+                            {label}
+                          </span>
+                        </NavLink>
+                      )
+                    })}
+                  </div>
                 )
               })}
-            </nav>
+            </GlideMenu>
 
             {/* Footer */}
             <div
@@ -663,6 +729,15 @@ export default function Layout({ children }: PropsWithChildren) {
               </button>
             </div>
             <div className="flex shrink-0 items-center gap-0.5">
+              <button
+                type="button"
+                onClick={() => setCommandOpen(true)}
+                className="flex size-9 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
+                title={t('nav.quickSearch')}
+                aria-label={t('nav.quickSearch')}
+              >
+                <Search className="size-4" />
+              </button>
               <button
                 onClick={toggleLang}
                 className="flex size-9 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"

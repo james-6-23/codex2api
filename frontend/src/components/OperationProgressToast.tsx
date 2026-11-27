@@ -1,6 +1,7 @@
-import { Check, Hourglass, X } from "lucide-react";
+import { Check, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { OperationProgressState } from "../hooks/useOperationProgress";
+import { PixelLoader, ShimmerText } from "@/components/ui/beautiful";
 
 // 批量操作进度浮层（右上角）。Codex / Grok 账号页共用，保证两处视觉一致。
 export default function OperationProgressToast({
@@ -74,29 +75,43 @@ export default function OperationProgressToast({
           ];
 
   return (
-    <div className="fixed right-4 top-4 z-[80] w-[min(380px,calc(100vw-2rem))] rounded-lg border border-border bg-card/98 p-4 text-card-foreground shadow-xl backdrop-blur">
+    <div
+      className="fixed right-4 top-4 z-[80] w-[min(392px,calc(100vw-2rem))] rounded-2xl border border-border/80 bg-card/98 p-4 text-card-foreground backdrop-blur-md dark:border-white/12"
+      style={{ boxShadow: "var(--bui-shadow-overlay)" }}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
             {progress.done ? (
-              <Check className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-600 ring-1 ring-inset ring-emerald-500/25 dark:text-emerald-400">
+                <Check className="size-3 stroke-[2.5]" />
+              </span>
             ) : (
-              <Hourglass className="size-4 shrink-0 animate-pulse text-primary" />
+              <PixelLoader mode="orbit" size="sm" />
             )}
-            <div className="truncate text-sm font-semibold">{progress.title}</div>
+            <div className="truncate text-sm font-semibold">
+              {progress.done ? progress.title : <ShimmerText>{progress.title}</ShimmerText>}
+            </div>
           </div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            {progress.done
-              ? t("accounts.operationProgressDone")
-              : t("accounts.operationProgressRunning")}
-            {" · "}
-            {progress.current}/{progress.total || 0}
+          <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+            <span>
+              {progress.done
+                ? t("accounts.operationProgressDone")
+                : t("accounts.operationProgressRunning")}
+            </span>
+            <span className="text-border">·</span>
+            <span className="font-mono tabular-nums text-foreground/85">
+              {progress.current}/{progress.total || 0}
+            </span>
+            <span className="font-mono text-[11px] tabular-nums text-muted-foreground/80">
+              ({percent}%)
+            </span>
           </div>
         </div>
         {closable ? (
           <button
             type="button"
-            className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            className="rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             onClick={onClose}
             aria-label={t("common.close")}
           >
@@ -107,9 +122,9 @@ export default function OperationProgressToast({
         )}
       </div>
 
-      <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted">
+      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted/80">
         <div
-          className={`h-full rounded-full transition-all duration-300 ease-out ${
+          className={`h-full rounded-full transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] ${
             progress.done ? "bg-emerald-500" : "bg-primary"
           }`}
           style={{ width: `${percent}%` }}
@@ -118,9 +133,12 @@ export default function OperationProgressToast({
 
       <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
         {metrics.map((metric) => (
-          <div key={metric.label} className="rounded-md bg-muted/40 px-2 py-1.5">
-            <div className="text-muted-foreground">{metric.label}</div>
-            <div className={`mt-0.5 font-semibold ${metric.tone}`}>
+          <div
+            key={metric.label}
+            className="rounded-lg border border-border/60 bg-muted/35 px-2.5 py-1.5 dark:border-white/[0.06] dark:bg-white/[0.03]"
+          >
+            <div className="truncate text-[11px] text-muted-foreground">{metric.label}</div>
+            <div className={`mt-0.5 font-mono text-sm font-semibold tabular-nums ${metric.tone}`}>
               {metric.value}
             </div>
           </div>
@@ -128,7 +146,7 @@ export default function OperationProgressToast({
       </div>
 
       {progress.message ? (
-        <div className="mt-3 max-h-10 overflow-hidden break-words text-xs text-muted-foreground">
+        <div className="mt-3 max-h-10 overflow-hidden break-words rounded-lg border border-border/50 bg-muted/25 px-2.5 py-1.5 font-mono text-[11px] text-muted-foreground">
           {progress.message}
         </div>
       ) : null}

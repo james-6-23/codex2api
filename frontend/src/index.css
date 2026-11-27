@@ -2,6 +2,7 @@
 @import "./website-theme-colors.css";
 @import "./website-theme-ui.css";
 @import "./glass-theme.css";
+@import "./studio-theme.css";
 
 @custom-variant dark (&:is(.dark *));
 

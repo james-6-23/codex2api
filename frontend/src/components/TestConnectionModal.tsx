@@ -48,6 +48,7 @@ import ScheduledConnectionTestsModal from "./ScheduledConnectionTestsModal";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
+import { CodeSurface, PixelLoader } from "@/components/ui/beautiful";
 
 async function copyTextToClipboard(text: string) {
   if (window.isSecureContext && navigator.clipboard?.writeText) {
@@ -764,15 +765,19 @@ export default function TestConnectionModal({
       contentClassName="sm:max-w-[760px]"
     >
       <div className="space-y-4">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <span
-            className={`flex items-center gap-1.5 text-sm font-semibold ${statusColor}`}
-          >
-            <StatusIcon
-              className={cn("size-4", statusIconSpin && "animate-spin")}
-            />
-            {statusText}
-          </span>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          {status === "connecting" || status === "streaming" ? (
+            <PixelLoader mode="orbit" size="sm" label={statusText} showElapsed />
+          ) : (
+            <span
+              className={`flex items-center gap-1.5 text-sm font-semibold ${statusColor}`}
+            >
+              <StatusIcon
+                className={cn("size-4", statusIconSpin && "animate-spin")}
+              />
+              {statusText}
+            </span>
+          )}
           <Select
             className="w-52 max-w-full"
             compact
@@ -802,7 +807,10 @@ export default function TestConnectionModal({
         {diagnostics && (
           <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
             {timingTiles.map((tile) => (
-              <div key={tile.key} className="rounded-md bg-muted/40 px-2.5 py-2">
+              <div
+                key={tile.key}
+                className="rounded-lg border border-border/60 bg-muted/35 px-2.5 py-2 dark:border-white/[0.06] dark:bg-white/[0.03]"
+              >
                 <div className="text-[11px] text-muted-foreground">{tile.label}</div>
                 <div
                   className={cn("mt-0.5 text-sm font-semibold tabular-nums", tile.tone)}
@@ -863,9 +871,7 @@ export default function TestConnectionModal({
             style={{ fontFamily: "var(--font-geist-mono)" }}
           >
             {output.length === 0 && status === "connecting" && (
-              <span className="text-muted-foreground animate-pulse">
-                {t("accounts.sendingTestRequest")}
-              </span>
+              <PixelLoader mode="drive" size="sm" label={t("accounts.sendingTestRequest")} />
             )}
             {output.join("")}
             <div ref={outputEndRef} />
@@ -1073,16 +1079,16 @@ export default function TestConnectionModal({
                       />
                     </button>
                     {rawOpen && (
-                      <div className="border-t border-border/70 px-3 py-2.5">
-                        <p className="mb-2 text-[11px] leading-relaxed text-muted-foreground">
+                      <div className="space-y-2 border-t border-border/70 px-3 py-2.5">
+                        <p className="text-[11px] leading-relaxed text-muted-foreground">
                           {t("accounts.testDiagRawHint")}
                         </p>
-                        <pre
-                          className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-[11px] leading-relaxed"
-                          style={monoStyle}
-                        >
-                          {diagnostics.response_body}
-                        </pre>
+                        <CodeSurface
+                          code={diagnostics.response_body}
+                          title={t("accounts.testDiagRawBody")}
+                          language="RAW"
+                          maxHeightClassName="max-h-64"
+                        />
                       </div>
                     )}
                   </div>

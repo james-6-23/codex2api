@@ -6,7 +6,7 @@ export type Theme = 'light' | 'dark'
 /** User preference: fixed light/dark, or follow OS. */
 export type ThemeMode = 'light' | 'dark' | 'system'
 
-export type WebsiteThemeStyle = 'github' | 'vercel' | 'google' | 'apple' | 'notion' | 'stripe' | 'spotify' | 'slack' | 'glass'
+export type WebsiteThemeStyle = 'studio' | 'github' | 'vercel' | 'google' | 'apple' | 'notion' | 'stripe' | 'spotify' | 'slack' | 'glass'
 
 export type ColorTheme =
   | WebsiteThemeStyle
@@ -81,6 +81,28 @@ function def(
 }
 
 export const COLOR_THEMES: ColorThemeDef[] = [
+  def({
+    id: 'studio',
+    nameKey: 'common.theme.studio',
+    descriptionKey: 'themeSettings.themeDesc.studio',
+    group: 'website',
+    uiStyle: 'studio',
+    recommended: true,
+    previewLight: {
+      primary: 'oklch(0.585 0.205 254.947)',
+      bg: 'oklch(0.966 0.002 252)',
+      surface: 'oklch(1 0 0)',
+      muted: 'oklch(0.946 0.003 252)',
+      sidebar: 'hsl(240 20% 99%)',
+    },
+    previewDark: {
+      primary: 'oklch(0.68 0.173 253.301)',
+      bg: 'oklch(0.195 0.004 264.5)',
+      surface: 'oklch(0.238 0.005 268)',
+      muted: 'oklch(0.275 0.006 266)',
+      sidebar: 'hsl(240 8% 12%)',
+    },
+  }),
   def({
     id: 'default',
     nameKey: 'common.theme.default',
@@ -793,7 +815,7 @@ export function getThemePreviewSwatch(item: ColorThemeDef, mode: Theme): ThemePr
 
 const STORAGE_KEY = 'theme'
 const COLOR_THEME_STORAGE_KEY = 'color-theme'
-const DEFAULT_COLOR_THEME: ColorTheme = 'default'
+const DEFAULT_COLOR_THEME: ColorTheme = 'studio'
 const DEFAULT_THEME_MODE: ThemeMode = 'system'
 
 function isColorTheme(value: string | null): value is ColorTheme {

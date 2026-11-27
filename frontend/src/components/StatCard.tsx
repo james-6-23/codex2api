@@ -23,7 +23,7 @@ export default function StatCard({ icon, iconClass, label, value, sub, className
   return (
     <Card
       className={cn(
-        'group relative overflow-hidden py-0 border-border/70 bg-card shadow-2xs transition-all duration-200 hover:-translate-y-0.5 hover:border-border hover:shadow-xs',
+        'group relative overflow-hidden py-0 border-border/80 bg-card shadow-xs transition-all duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] hover:-translate-y-0.5 hover:border-border hover:shadow-sm dark:border-white/10 dark:hover:border-white/16',
         className,
       )}
     >
