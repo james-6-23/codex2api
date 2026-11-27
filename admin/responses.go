@@ -347,6 +347,8 @@ type runtimeUsageLogResponse struct {
 type runtimeProbesResponse struct {
 	Status                             string `json:"status"`
 	LazyMode                           bool   `json:"lazy_mode"`
+	CodexOAuthKeepaliveEnabled         bool   `json:"codex_oauth_keepalive_enabled"`
+	ClaudeOAuthKeepaliveEnabled        bool   `json:"claude_oauth_keepalive_enabled"`
 	BackgroundRefreshIntervalMinutes   int    `json:"background_refresh_interval_minutes"`
 	UsageProbeMaxAgeMinutes            int    `json:"usage_probe_max_age_minutes"`
 	UsageProbeConcurrency              int    `json:"usage_probe_concurrency"`

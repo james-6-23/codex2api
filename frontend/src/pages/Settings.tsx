@@ -2805,6 +2805,7 @@ export default function Settings() {
 	    recovery_probe_interval_minutes: 30,
     lazy_mode: false,
     codex_oauth_keepalive_enabled: false,
+    claude_oauth_keepalive_enabled: false,
     pg_max_conns: 50,
     redis_pool_size: 30,
     auto_clean_unauthorized: false,
@@ -4114,6 +4115,11 @@ export default function Settings() {
                       value={settingsForm.background_quiet_hours ?? []}
                       onSave={(periods) => autoSaveSettingsPatch({ background_quiet_hours: periods })}
                     />
+                    {(settingsForm.background_quiet_hours ?? []).length > 0 && (settingsForm.codex_oauth_keepalive_enabled || settingsForm.claude_oauth_keepalive_enabled) && (
+                      <p className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
+                        {t('settings.quietHoursKeepaliveNotice')}
+                      </p>
+                    )}
                     <div className={SETTINGS_SWITCH_GRID}>
                       <SettingField label={t('settings.usageProbeResponsesFallback')} description={t('settings.usageProbeResponsesFallbackDesc')} layout="switch">
                         <Switch
@@ -4137,6 +4143,13 @@ export default function Settings() {
                           aria-label={t('settings.codexOAuthKeepalive')}
                           checked={settingsForm.codex_oauth_keepalive_enabled}
                           onCheckedChange={(checked) => autoSaveBooleanField('codex_oauth_keepalive_enabled', checked)}
+                        />
+                      </SettingField>
+                      <SettingField label={t('settings.claudeOAuthKeepalive')} description={t('settings.claudeOAuthKeepaliveDesc')} layout="switch">
+                        <Switch
+                          aria-label={t('settings.claudeOAuthKeepalive')}
+                          checked={settingsForm.claude_oauth_keepalive_enabled}
+                          onCheckedChange={(checked) => autoSaveBooleanField('claude_oauth_keepalive_enabled', checked)}
                         />
                       </SettingField>
                       {inviteGuideEnabled !== null && (

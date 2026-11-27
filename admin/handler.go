@@ -1765,20 +1765,23 @@ func isDashboardRateLimitedAccount(status string, cooldownReason string) bool {
 // ==================== Accounts ====================
 
 type accountResponse struct {
-	CodexLastRefreshAt      string `json:"codex_last_refresh_at,omitempty"`
-	CodexRefreshError       string `json:"codex_refresh_error,omitempty"`
-	UpstreamRequestIDHeader string `json:"upstream_request_id_header"`
-	DetailLoaded            bool   `json:"detail_loaded,omitempty"`
-	ID                      int64  `json:"id"`
-	Name                    string `json:"name"`
-	Email                   string `json:"email"`
-	EmailDomain             string `json:"email_domain,omitempty"`
-	ChatGPTAccountID        string `json:"chatgpt_account_id,omitempty"`
-	TokenWorkspaceID        string `json:"token_workspace_id,omitempty"`
-	WorkspaceIDOverride     string `json:"workspace_id_override,omitempty"`
-	EffectiveWorkspaceID    string `json:"effective_workspace_id,omitempty"`
-	PlanType                string `json:"plan_type"`
-	SubscriptionExpiresAt   string `json:"subscription_expires_at,omitempty"`
+	CodexLastRefreshAt       string `json:"codex_last_refresh_at,omitempty"`
+	CodexRefreshError        string `json:"codex_refresh_error,omitempty"`
+	ClaudeLastRefreshAt      string `json:"claude_last_refresh_at,omitempty"`
+	ClaudeRefreshError       string `json:"claude_refresh_error,omitempty"`
+	ClaudeRefreshNextRetryAt string `json:"claude_refresh_next_retry_at,omitempty"`
+	UpstreamRequestIDHeader  string `json:"upstream_request_id_header"`
+	DetailLoaded             bool   `json:"detail_loaded,omitempty"`
+	ID                       int64  `json:"id"`
+	Name                     string `json:"name"`
+	Email                    string `json:"email"`
+	EmailDomain              string `json:"email_domain,omitempty"`
+	ChatGPTAccountID         string `json:"chatgpt_account_id,omitempty"`
+	TokenWorkspaceID         string `json:"token_workspace_id,omitempty"`
+	WorkspaceIDOverride      string `json:"workspace_id_override,omitempty"`
+	EffectiveWorkspaceID     string `json:"effective_workspace_id,omitempty"`
+	PlanType                 string `json:"plan_type"`
+	SubscriptionExpiresAt    string `json:"subscription_expires_at,omitempty"`
 	// Subscription 服务端计算的订阅状态对象（业务状态 + 同步状态）；不跟踪订阅的
 	// 套餐（api/无到期时间的 free）为空。
 	Subscription          *auth.SubscriptionStatusView `json:"subscription,omitempty"`
@@ -9426,6 +9429,7 @@ type settingsResponse struct {
 	RecoveryProbeIntervalMinutes        int    `json:"recovery_probe_interval_minutes"`
 	LazyMode                            bool   `json:"lazy_mode"`
 	CodexOAuthKeepaliveEnabled          bool   `json:"codex_oauth_keepalive_enabled"`
+	ClaudeOAuthKeepaliveEnabled         bool   `json:"claude_oauth_keepalive_enabled"`
 	ProxyURL                            string `json:"proxy_url"`
 	PgMaxConns                          int    `json:"pg_max_conns"`
 	RedisPoolSize                       int    `json:"redis_pool_size"`
@@ -9631,6 +9635,7 @@ type updateSettingsReq struct {
 	RecoveryProbeIntervalMinutes        *int                             `json:"recovery_probe_interval_minutes"`
 	LazyMode                            *bool                            `json:"lazy_mode"`
 	CodexOAuthKeepaliveEnabled          *bool                            `json:"codex_oauth_keepalive_enabled"`
+	ClaudeOAuthKeepaliveEnabled         *bool                            `json:"claude_oauth_keepalive_enabled"`
 	ProxyURL                            *string                          `json:"proxy_url"`
 	PgMaxConns                          *int                             `json:"pg_max_conns"`
 	RedisPoolSize                       *int                             `json:"redis_pool_size"`
@@ -10490,6 +10495,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		RecoveryProbeIntervalMinutes:        h.store.GetRecoveryProbeIntervalMinutes(),
 		LazyMode:                            h.store.GetLazyMode(),
 		CodexOAuthKeepaliveEnabled:          h.store.GetCodexOAuthKeepalive(),
+		ClaudeOAuthKeepaliveEnabled:         h.store.GetClaudeOAuthKeepalive(),
 		ProxyURL:                            h.store.GetProxyURL(),
 		PgMaxConns:                          h.pgMaxConns,
 		RedisPoolSize:                       h.redisPoolSize,
@@ -11211,6 +11217,11 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 
 	if req.CodexOAuthKeepaliveEnabled != nil {
 		h.store.SetCodexOAuthKeepalive(*req.CodexOAuthKeepaliveEnabled)
+		log.Printf("设置已更新: codex_oauth_keepalive_enabled = %t", *req.CodexOAuthKeepaliveEnabled)
+	}
+	if req.ClaudeOAuthKeepaliveEnabled != nil {
+		h.store.SetClaudeOAuthKeepalive(*req.ClaudeOAuthKeepaliveEnabled)
+		log.Printf("设置已更新: claude_oauth_keepalive_enabled = %t", *req.ClaudeOAuthKeepaliveEnabled)
 	}
 	if req.LazyMode != nil {
 		h.store.SetLazyMode(*req.LazyMode)
@@ -12106,6 +12117,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		RecoveryProbeIntervalMinutes:        h.store.GetRecoveryProbeIntervalMinutes(),
 		LazyMode:                            h.store.GetLazyMode(),
 		CodexOAuthKeepaliveEnabled:          h.store.GetCodexOAuthKeepalive(),
+		ClaudeOAuthKeepaliveEnabled:         h.store.GetClaudeOAuthKeepalive(),
 		ProxyURL:                            h.store.GetProxyURL(),
 		PgMaxConns:                          h.pgMaxConns,
 		RedisPoolSize:                       h.redisPoolSize,
@@ -12508,6 +12520,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		RecoveryProbeIntervalMinutes:        h.store.GetRecoveryProbeIntervalMinutes(),
 		LazyMode:                            h.store.GetLazyMode(),
 		CodexOAuthKeepaliveEnabled:          h.store.GetCodexOAuthKeepalive(),
+		ClaudeOAuthKeepaliveEnabled:         h.store.GetClaudeOAuthKeepalive(),
 		ProxyURL:                            h.store.GetProxyURL(),
 		PgMaxConns:                          h.pgMaxConns,
 		RedisPoolSize:                       h.redisPoolSize,

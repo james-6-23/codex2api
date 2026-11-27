@@ -495,7 +495,7 @@ func (o *ClaudeAuth) exchangeAuthorizationCode(ctx context.Context, code, verifi
 		return nil, fmt.Errorf("序列化授权码交换请求失败: %w", err)
 	}
 
-	body, status, err := o.doClaudeOAuthPost(ctx, ClaudeOAuthTokenURL, jsonBody)
+	body, status, _, err := o.doClaudeOAuthPost(ctx, ClaudeOAuthTokenURL, jsonBody)
 	if err != nil {
 		return nil, err
 	}
@@ -573,14 +573,16 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 		return nil, fmt.Errorf("序列化刷新请求失败: %w", err)
 	}
 
-	body, status, err := o.doClaudeOAuthPost(ctx, ClaudeOAuthTokenURL, jsonBody)
+	// 传输/读响应错误结果不确定（Anthropic 可能已消费单次 RT），不在此层盲目重放，
+	// 交由上层按退避策略处理；429 透传 Retry-After 供上层退避。
+	body, status, headers, err := o.doClaudeOAuthPost(ctx, ClaudeOAuthTokenURL, jsonBody)
 	if err != nil {
 		return nil, err
 	}
 	if status != http.StatusOK {
 		// Classify by OAuth error code and strip the refresh token from the body
 		// so invalid_grant is distinct from transport noise without leaking the RT.
-		return nil, newOAuthRefreshHTTPError(status, body, refreshToken)
+		return nil, newOAuthRefreshHTTPErrorWithRetryAfter(status, body, refreshToken, parseClaudeRefreshRetryAfter(headers))
 	}
 
 	var tokenResp claudeTokenResponse
@@ -703,19 +705,60 @@ func (o *ClaudeAuth) FetchModels(ctx context.Context, accessToken string) ([]str
 	return ids, nil
 }
 
-// doClaudeOAuthPost 发送一个 axios 伪装的 OAuth POST，返回解码后的响应体与状态码。
-func (o *ClaudeAuth) doClaudeOAuthPost(ctx context.Context, endpoint string, jsonBody []byte) ([]byte, int, error) {
+// doClaudeOAuthPost 发送一个 axios 伪装的 OAuth POST，返回解码后的响应体、状态码与响应头。
+func (o *ClaudeAuth) doClaudeOAuthPost(ctx context.Context, endpoint string, jsonBody []byte) ([]byte, int, http.Header, error) {
 	resp, err := o.doWithFallback(ctx, http.MethodPost, endpoint, jsonBody, nil)
 	if err != nil {
-		return nil, 0, fmt.Errorf("OAuth 请求失败: %w", err)
+		return nil, 0, nil, fmt.Errorf("OAuth 请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := readClaudeOAuthResponseBody(resp)
 	if err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("读取 OAuth 响应失败: %w", err)
+		return nil, resp.StatusCode, resp.Header.Clone(), fmt.Errorf("读取 OAuth 响应失败: %w", err)
 	}
-	return body, resp.StatusCode, nil
+	return body, resp.StatusCode, resp.Header.Clone(), nil
+}
+
+const (
+	claudeRefreshMinRetryAfter = 5 * time.Second
+	claudeRefreshMaxRetryAfter = 30 * time.Minute
+)
+
+func clampClaudeRefreshRetryAfter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	if d < claudeRefreshMinRetryAfter {
+		return claudeRefreshMinRetryAfter
+	}
+	if d > claudeRefreshMaxRetryAfter {
+		return claudeRefreshMaxRetryAfter
+	}
+	return d
+}
+
+// parseClaudeRefreshRetryAfter 解析 Anthropic OAuth 端点 429/503 返回的 Retry-After / Retry-After-Ms。
+func parseClaudeRefreshRetryAfter(headers http.Header) time.Duration {
+	if len(headers) == 0 {
+		return 0
+	}
+	if raw := strings.TrimSpace(headers.Get("Retry-After")); raw != "" {
+		if seconds, err := time.ParseDuration(raw + "s"); err == nil && seconds > 0 {
+			return clampClaudeRefreshRetryAfter(seconds)
+		}
+		if when, err := http.ParseTime(raw); err == nil {
+			if delta := time.Until(when); delta > 0 {
+				return clampClaudeRefreshRetryAfter(delta)
+			}
+		}
+	}
+	if raw := strings.TrimSpace(headers.Get("Retry-After-Ms")); raw != "" {
+		if ms, err := time.ParseDuration(raw + "ms"); err == nil && ms > 0 {
+			return clampClaudeRefreshRetryAfter(ms)
+		}
+	}
+	return 0
 }
 
 // applyClaudeOAuthAxiosHeaders 复刻官方客户端 OAuth 控制面请求的 axios 头，降低被

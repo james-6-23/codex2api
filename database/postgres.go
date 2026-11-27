@@ -1470,6 +1470,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_expired BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS lazy_mode BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_oauth_keepalive_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS claude_oauth_keepalive_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS model_mapping TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_model_mapping TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS payload_rules TEXT DEFAULT '{}';
@@ -2446,6 +2447,7 @@ type SystemSettings struct {
 	AutoCleanExpired                   bool
 	LazyMode                           bool
 	CodexOAuthKeepaliveEnabled         bool
+	ClaudeOAuthKeepaliveEnabled        bool
 	ProxyPoolEnabled                   bool
 	FastSchedulerEnabled               bool
 	SchedulerEngine                    string
@@ -2815,7 +2817,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(codex_telemetry_timing_debug, false),
 		       COALESCE(auto_reset_credits_on_exhaustion_enabled, false),
 		       COALESCE(codex_ws_downstream_keepalive_slots, 8),
-		       COALESCE(background_quiet_hours, '[]')
+		       COALESCE(background_quiet_hours, '[]'),
+		       COALESCE(claude_oauth_keepalive_enabled, false)
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -2904,7 +2907,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.CodexOAuthKeepaliveEnabled,
 		&s.CodexTelemetryTimingDebug,
 		&s.AutoResetCreditsOnExhaustionEnabled,
-		&s.CodexWSDownstreamKeepaliveSlots, &s.BackgroundQuietHours,
+		&s.CodexWSDownstreamKeepaliveSlots, &s.BackgroundQuietHours, &s.ClaudeOAuthKeepaliveEnabled,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -3186,9 +3189,9 @@ func updateSystemSettingsWithExecer(ctx context.Context, execer systemSettingsEx
 					codex_oauth_keepalive_enabled,
 					codex_telemetry_timing_debug,
 					auto_reset_credits_on_exhaustion_enabled,
-					codex_ws_downstream_keepalive_slots, background_quiet_hours
+					codex_ws_downstream_keepalive_slots, background_quiet_hours, claude_oauth_keepalive_enabled
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121, $122, $123, $124, $125, $126, $127, $130, $131)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121, $122, $123, $124, $125, $126, $127, $130, $131, $132)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -3315,7 +3318,8 @@ func updateSystemSettingsWithExecer(ctx context.Context, execer systemSettingsEx
 					codex_telemetry_timing_debug = EXCLUDED.codex_telemetry_timing_debug,
 					auto_reset_credits_on_exhaustion_enabled = EXCLUDED.auto_reset_credits_on_exhaustion_enabled,
 					codex_ws_downstream_keepalive_slots = EXCLUDED.codex_ws_downstream_keepalive_slots,
-					background_quiet_hours = EXCLUDED.background_quiet_hours
+					background_quiet_hours = EXCLUDED.background_quiet_hours,
+					claude_oauth_keepalive_enabled = EXCLUDED.claude_oauth_keepalive_enabled
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -3373,7 +3377,7 @@ func updateSystemSettingsWithExecer(ctx context.Context, execer systemSettingsEx
 		s.CodexTelemetryTimingDebug,
 		s.AutoResetCreditsOnExhaustionEnabled,
 		s.PreservePromptFilterCustomPatterns,
-		s.PreservePromptFilterReviewAPIKey, NormalizeCodexWSDownstreamKeepaliveSlots(s.CodexWSDownstreamKeepaliveSlots), quietHours)
+		s.PreservePromptFilterReviewAPIKey, NormalizeCodexWSDownstreamKeepaliveSlots(s.CodexWSDownstreamKeepaliveSlots), quietHours, s.ClaudeOAuthKeepaliveEnabled)
 	return err
 }
 

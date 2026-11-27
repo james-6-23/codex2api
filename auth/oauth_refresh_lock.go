@@ -406,6 +406,10 @@ func (s *Store) reloadOAuthCredentialsAfterLock(
 	if acc.isKiroLocked() {
 		acc.Kiro = KiroCredentialFromRow(row)
 	}
+	if acc.isClaudeOAuthLocked() {
+		acc.claudeRefreshFailures = 0
+		acc.claudeRefreshNextRetryAt = time.Time{}
+	}
 	effectiveAccessToken := acc.AccessToken
 	effectiveExpiresAt := acc.ExpiresAt
 	acc.mu.Unlock()

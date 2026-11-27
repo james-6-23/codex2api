@@ -118,19 +118,20 @@ func testCodexKeepaliveSettings(t *testing.T, db *DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.CodexOAuthKeepaliveEnabled {
-		t.Fatal("keepalive must default off")
+	if settings.CodexOAuthKeepaliveEnabled || settings.ClaudeOAuthKeepaliveEnabled {
+		t.Fatal("oauth keepalive settings must default off")
 	}
 	for _, enabled := range []bool{true, false} {
 		settings.CodexOAuthKeepaliveEnabled = enabled
+		settings.ClaudeOAuthKeepaliveEnabled = enabled
 		settings.PreservePromptFilterCustomPatterns = true
 		settings.PreservePromptFilterReviewAPIKey = true
 		if err := db.UpdateSystemSettings(ctx, settings); err != nil {
 			t.Fatal(err)
 		}
 		stored, err := db.GetSystemSettings(ctx)
-		if err != nil || stored.CodexOAuthKeepaliveEnabled != enabled {
-			t.Fatalf("keepalive setting lost: %v", err)
+		if err != nil || stored.CodexOAuthKeepaliveEnabled != enabled || stored.ClaudeOAuthKeepaliveEnabled != enabled {
+			t.Fatalf("keepalive setting lost: codex=%t claude=%t err=%v", stored.CodexOAuthKeepaliveEnabled, stored.ClaudeOAuthKeepaliveEnabled, err)
 		}
 	}
 }

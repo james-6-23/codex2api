@@ -714,9 +714,17 @@ curl -H "X-Admin-Key: your-secret" http://localhost:8080/api/admin/ops/overview
 - `REDIS_ADDR is empty` - Redis 模式下未配置 Redis 地址
 - `DATABASE_PATH is empty` - SQLite 模式下未配置数据路径
 
-### 惰性模式下的 Codex 授权保活
+### 惰性模式下的 OAuth 授权保活（Codex / Claude）
 
 管理设置 `codex_oauth_keepalive_enabled`（默认 `false`）允许惰性模式单独运行 Codex Token 续期。它使用现有 `background_refresh_interval_minutes` 巡检间隔和 AT 到期前 5 分钟的阈值，不改变额度冷却、不启用生成探针，也不影响 Claude、Grok 或 Antigravity 的刷新策略。普通模式本来就运行 Codex 续期，不依赖此开关。
+
+管理设置 `claude_oauth_keepalive_enabled`（默认 `false`）允许惰性模式单独维护 Claude OAuth 账号授权：
+
+- 仅对带有有效 Refresh Token 的 Claude OAuth 账号执行，自动跳过 API Key、Setup Token、人工停用（禁用调度）以及已确认永久失效的账号。
+- 复用现有 `background_refresh_interval_minutes` 巡检间隔，在 AT 到期前 30 分钟内触发续期，并在 5h/7d 限流冷却期间保留原有冷却状态不变，不触发用量/恢复/生成探针，也不影响 Codex、Grok、Antigravity 或 Kiro。
+- 复用跨实例共享 OAuth 刷新租约与不可取消落库重试，避免后台保活与请求触发的按需刷新并发消费同一 RT。
+- 区分可重试的网络/限流/5xx 错误（指数退避并尊重 429 `Retry-After`，不误标封禁）与明确的永久 OAuth 失败（如 `invalid_grant`），账号详情页展示脱敏后的最近续期时间、提示与下次自动重试时间。
+- 后台静默时段（`background_quiet_hours`）优先级高于 OAuth 保活：静默期间会暂停 Codex/Claude 后台续期；若静默时长覆盖 Claude AT 有效期，AT 会在静默结束后或首次业务请求时按需续期。
 
 Codex 刷新新增 `codex_oauth_refresh_attempts` 保护表，启动时自动创建，兼容 PostgreSQL 与 SQLite。表内只保存旧 RT 的 SHA-256 指纹、刷新操作 ID 和开始时间，不保存明文 Token。成功保存全部相关凭据后删除记录；结果不确定的记录保留，防止跨实例或重启后重复消费旧 RT。已有凭据无需重新导入；已经失效的授权需重新登录恢复。
 

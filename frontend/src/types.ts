@@ -425,6 +425,9 @@ export interface SubscriptionRefreshResponse {
 export interface AccountRow {
   codex_last_refresh_at?: string
   codex_refresh_error?: string
+  claude_last_refresh_at?: string
+  claude_refresh_error?: string
+  claude_refresh_next_retry_at?: string
   upstream_request_id_header?: string | null
   detail_loaded?: boolean
   id: number
@@ -2175,6 +2178,8 @@ export interface RuntimeStatusResponse {
   probes: {
     status: RuntimeHealthStatus
     lazy_mode: boolean
+    codex_oauth_keepalive_enabled?: boolean
+    claude_oauth_keepalive_enabled?: boolean
     background_refresh_interval_minutes: number
 	    usage_probe_max_age_minutes: number
 	    usage_probe_concurrency: number
@@ -2254,6 +2259,7 @@ export interface SystemSettings {
 	  recovery_probe_interval_minutes: number
   lazy_mode: boolean
   codex_oauth_keepalive_enabled: boolean
+  claude_oauth_keepalive_enabled: boolean
   proxy_url?: string
   pg_max_conns: number
   redis_pool_size: number

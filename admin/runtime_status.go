@@ -252,6 +252,8 @@ func (h *Handler) runtimeProbesStatus() runtimeProbesResponse {
 	}
 	resp.Status = runtimeStatusOK
 	resp.LazyMode = h.store.GetLazyMode()
+	resp.CodexOAuthKeepaliveEnabled = h.store.GetCodexOAuthKeepalive()
+	resp.ClaudeOAuthKeepaliveEnabled = h.store.GetClaudeOAuthKeepalive()
 	resp.BackgroundRefreshIntervalMinutes = h.store.GetBackgroundRefreshIntervalMinutes()
 	resp.UsageProbeMaxAgeMinutes = h.store.GetUsageProbeMaxAgeMinutes()
 	resp.UsageProbeConcurrency = h.store.GetUsageProbeConcurrency()

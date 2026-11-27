@@ -344,12 +344,17 @@ func isOAuthRefreshUncertain(err error) bool {
 }
 
 type oauthRefreshHTTPError struct {
-	status int
-	code   string
-	body   string
+	status     int
+	code       string
+	body       string
+	retryAfter time.Duration
 }
 
 func newOAuthRefreshHTTPError(status int, body []byte, rt string) error {
+	return newOAuthRefreshHTTPErrorWithRetryAfter(status, body, rt, 0)
+}
+
+func newOAuthRefreshHTTPErrorWithRetryAfter(status int, body []byte, rt string, retryAfter time.Duration) error {
 	var payload struct {
 		Error json.RawMessage `json:"error"`
 	}
@@ -364,7 +369,16 @@ func newOAuthRefreshHTTPError(status int, body []byte, rt string) error {
 			}
 		}
 	}
-	return &oauthRefreshHTTPError{status: status, code: strings.ToLower(strings.TrimSpace(code)), body: strings.ReplaceAll(string(body), rt, "[REDACTED]")}
+	redactedBody := string(body)
+	if rt != "" {
+		redactedBody = strings.ReplaceAll(redactedBody, rt, "[REDACTED]")
+	}
+	return &oauthRefreshHTTPError{
+		status:     status,
+		code:       strings.ToLower(strings.TrimSpace(code)),
+		body:       redactedBody,
+		retryAfter: retryAfter,
+	}
 }
 
 func (e *oauthRefreshHTTPError) Error() string {
@@ -375,6 +389,14 @@ func (e *oauthRefreshHTTPError) PermanentRefreshFailure() bool {
 		return permanentOAuthRefreshCode(e.code)
 	}
 	return isNonRetryable(errors.New(e.body))
+}
+
+func oauthRefreshRetryAfter(err error) time.Duration {
+	var httpErr *oauthRefreshHTTPError
+	if errors.As(err, &httpErr) && httpErr.retryAfter > 0 {
+		return httpErr.retryAfter
+	}
+	return 0
 }
 
 func permanentOAuthRefreshCode(code string) bool {

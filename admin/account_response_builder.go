@@ -231,6 +231,9 @@ func (h *Handler) buildAccountResponse(
 		Subscription:                 subscriptionStatusViewForRow(row, planType),
 		CodexLastRefreshAt:           row.GetCredential("codex_last_refresh_at"),
 		CodexRefreshError:            row.GetCredential("codex_refresh_error"),
+		ClaudeLastRefreshAt:          claudeRowOAuthRefreshMeta(row, isClaudeAccount, auth.ClaudeLastRefreshAtCredentialKey),
+		ClaudeRefreshError:           claudeRowOAuthRefreshMeta(row, isClaudeAccount, auth.ClaudeRefreshErrorCredentialKey),
+		ClaudeRefreshNextRetryAt:     claudeRowOAuthRefreshMeta(row, isClaudeAccount, auth.ClaudeRefreshNextRetryAtCredentialKey),
 		Status:                       row.Status,
 		ErrorMessage:                 row.ErrorMessage,
 		ATOnly:                       !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
@@ -540,6 +543,13 @@ func claudeAccountUsageWindows(row *database.AccountRow) []auth.ClaudeUsageWindo
 		}
 	}
 	return windows
+}
+
+func claudeRowOAuthRefreshMeta(row *database.AccountRow, isClaude bool, key string) string {
+	if !isClaude || row == nil || claudeAuthKindForRow(row, true) != auth.ClaudeAuthKindOAuth {
+		return ""
+	}
+	return strings.TrimSpace(row.GetCredential(key))
 }
 
 func parseClaudeUsageWindows(raw string) []auth.ClaudeUsageWindow {

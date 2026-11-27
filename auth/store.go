@@ -427,6 +427,10 @@ type Account struct {
 	// 仅内存态。刷新成功或人工清理(ClearCooldown)清零;达到
 	// permanentRefreshFailureTerminalLimit 后转 error 终态并退出恢复探测轮换。
 	PermanentRefreshFailures int
+	// claudeRefreshFailures / claudeRefreshNextRetryAt 记录 Claude OAuth
+	// 后台续期的瞬时错误退避状态（受 a.mu 保护）。刷新成功、凭据变更或人工清理后清零。
+	claudeRefreshFailures    int
+	claudeRefreshNextRetryAt time.Time
 	// LastFailureKind 记录最近一次失败的归因（与 ReportRequestFailure 的 kind
 	// 同义），仅内存态。用于把"传输层抖动"与"账号自身有问题"区分开，见
 	// recomputeSchedulerLocked 里对孤立断流的豁免。
@@ -4051,6 +4055,7 @@ type Store struct {
 	autoCleanExpired                   atomic.Bool
 	lazyMode                           atomic.Bool
 	codexOAuthKeepalive                atomic.Bool
+	claudeOAuthKeepalive               atomic.Bool
 	autoCleanupBatch                   atomic.Bool
 	maxRetries                         atomic.Int64 // 请求失败最大重试次数（换号重试）
 	maxRateLimitRetries                atomic.Int64 // 429 最大换号重试次数
@@ -4891,6 +4896,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.autoCleanExpired.Store(settings.AutoCleanExpired)
 	s.lazyMode.Store(settings.LazyMode)
 	s.codexOAuthKeepalive.Store(settings.CodexOAuthKeepaliveEnabled)
+	s.claudeOAuthKeepalive.Store(settings.ClaudeOAuthKeepaliveEnabled)
 	retries := int64(settings.MaxRetries)
 	if retries <= 0 {
 		retries = 2 // 默认重试 2 次
@@ -6302,6 +6308,11 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 				log.Printf("[账号 %d] 解析 claude_usage_probe_at 失败: %v", row.ID, parseErr)
 			}
 		}
+		if nextRetryRaw := strings.TrimSpace(row.GetCredential(ClaudeRefreshNextRetryAtCredentialKey)); nextRetryRaw != "" {
+			if nextRetryAt := parseOAuthCredentialExpiry(nextRetryRaw); !nextRetryAt.IsZero() {
+				account.claudeRefreshNextRetryAt = nextRetryAt
+			}
+		}
 	}
 	if account.CredentialGeneration <= 0 {
 		account.CredentialGeneration = 1
@@ -6911,7 +6922,7 @@ func (s *Store) StartBackgroundRefresh() {
 				catalogTimer.Reset(antigravityCatalogRefreshInterval)
 			case <-refreshTimer.C:
 				if s.GetLazyMode() {
-					if s.GetCodexOAuthKeepalive() {
+					if s.GetCodexOAuthKeepalive() || s.GetClaudeOAuthKeepalive() {
 						s.parallelRefreshAll(backgroundCtx)
 					}
 					s.TriggerUsageProbeAsync()
@@ -11330,6 +11341,8 @@ func (s *Store) ClearCooldown(acc *Account) {
 	acc.CooldownReason = ""
 	// 人工清理即重新给自愈机会:重置死 RT 判定,恢复探测资格随之恢复。
 	acc.PermanentRefreshFailures = 0
+	acc.claudeRefreshFailures = 0
+	acc.claudeRefreshNextRetryAt = time.Time{}
 	acc.transientRateLimitBackoff = 0
 	acc.transientRateLimitUntil = time.Time{}
 	if acc.transientRateLimitTimer != nil {
@@ -12640,8 +12653,11 @@ func (s *Store) parallelRefreshAll(ctx context.Context) {
 	sem := make(chan struct{}, 10)
 	var wg sync.WaitGroup
 
+	lazyMode := s.GetLazyMode()
+	codexKeepalive := !lazyMode || s.GetCodexOAuthKeepalive()
+	claudeKeepalive := !lazyMode || s.GetClaudeOAuthKeepalive()
 	for i, acc := range accounts {
-		if !s.shouldBackgroundRefresh(acc, s.GetLazyMode()) {
+		if !s.shouldBackgroundRefreshForPolicy(acc, lazyMode, codexKeepalive, claudeKeepalive) {
 			continue
 		}
 

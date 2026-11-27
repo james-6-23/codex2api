@@ -680,6 +680,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "auto_clean_expired", "INTEGER DEFAULT 0"},
 		{"system_settings", "lazy_mode", "INTEGER DEFAULT 0"},
 		{"system_settings", "codex_oauth_keepalive_enabled", "INTEGER DEFAULT 0"},
+		{"system_settings", "claude_oauth_keepalive_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "proxy_pool_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "fast_scheduler_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "scheduler_engine", "TEXT DEFAULT ''"},

@@ -461,10 +461,42 @@ func (s *Store) probeCodexAuthorization(ctx context.Context, acc *Account, probe
 	s.fastSchedulerUpdate(acc)
 }
 
+func isQuotaCooldownReason(reason string) bool {
+	switch reason {
+	case "rate_limited", "rate_limited_5h", "rate_limited_7d", "usage_limit", "usage_limited", ResponsesRateLimitedCooldownReason:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Store) shouldBackgroundRefresh(acc *Account, codexOnly bool) bool {
+	if codexOnly {
+		return s.shouldBackgroundRefreshForPolicy(acc, true, true, false)
+	}
+	return s.shouldBackgroundRefreshForPolicy(acc, false, true, true)
+}
+
+func (s *Store) shouldBackgroundRefreshForPolicy(acc *Account, lazyMode, codexKeepalive, claudeKeepalive bool) bool {
 	acc.mu.RLock()
 	defer acc.mu.RUnlock()
+	now := time.Now()
 	codex := !acc.isRelayStyleLocked() && !acc.isCodexAgentIdentityLocked()
+	claudeOAuth := acc.isClaudeOAuthRefreshableLocked()
+	if lazyMode {
+		switch {
+		case codex:
+			if !codexKeepalive {
+				return false
+			}
+		case claudeOAuth:
+			if !claudeKeepalive {
+				return false
+			}
+		default:
+			return false
+		}
+	}
 	if codex && atomic.LoadInt32(&acc.Disabled) != 0 {
 		return false
 	}
@@ -473,32 +505,45 @@ func (s *Store) shouldBackgroundRefresh(acc *Account, codexOnly bool) bool {
 	if acc.isGrokAPILocked() && (atomic.LoadInt32(&acc.Disabled) != 0 || atomic.LoadInt32(&acc.DispatchPaused) != 0) {
 		return false
 	}
-	if codexOnly && !codex {
-		return false
-	}
-	// A recoverable Claude 401 latches Banned/unauthorized before the refresh
-	// token is known to be dead. Keep one background exchange available until
-	// that exchange reports a permanent failure. Terminal errors and revoked
-	// refresh tokens stay on the bounded backoff below.
-	if claudeAuthFailureNeedsBackgroundRefreshLocked(acc) {
+	if acc.isClaudeOAuthLocked() {
+		if !claudeOAuth || atomic.LoadInt32(&acc.DispatchPaused) != 0 {
+			return false
+		}
+		if acc.Status == StatusError || acc.PermanentRefreshFailures > 0 {
+			return false
+		}
+		if !acc.claudeRefreshNextRetryAt.IsZero() && now.Before(acc.claudeRefreshNextRetryAt) {
+			return false
+		}
+		// A recoverable Claude 401 latches Banned/unauthorized before the refresh
+		// token is known to be dead. Keep one background exchange available until
+		// that exchange reports a permanent failure. Terminal errors and revoked
+		// refresh tokens stay excluded above.
+		if claudeAuthFailureNeedsBackgroundRefreshLocked(acc) {
+			return true
+		}
+		if acc.healthTierLocked() == HealthTierBanned {
+			return false
+		}
+		if strings.TrimSpace(acc.AccessToken) != "" && !acc.ExpiresAt.IsZero() && acc.ExpiresAt.Sub(now) >= claudeBackgroundRefreshLead {
+			return false
+		}
+		if acc.Status == StatusCooldown && now.Before(acc.CooldownUtil) {
+			return isQuotaCooldownReason(acc.CooldownReason)
+		}
 		return true
 	}
 	if acc.isAntigravityAPILocked() || acc.Status == StatusError || acc.healthTierLocked() == HealthTierBanned || strings.TrimSpace(acc.RefreshToken) == "" {
 		return false
 	}
-	if time.Until(acc.ExpiresAt) >= 5*time.Minute {
+	if acc.ExpiresAt.Sub(now) >= 5*time.Minute {
 		return false
 	}
-	if acc.Status == StatusCooldown && time.Now().Before(acc.CooldownUtil) {
+	if acc.Status == StatusCooldown && now.Before(acc.CooldownUtil) {
 		if !codex {
 			return false
 		}
-		switch acc.CooldownReason {
-		case "rate_limited", "rate_limited_5h", "rate_limited_7d", "usage_limit", "usage_limited", ResponsesRateLimitedCooldownReason:
-			return true
-		default:
-			return false
-		}
+		return isQuotaCooldownReason(acc.CooldownReason)
 	}
 	return !codex || atomic.LoadInt32(&acc.DispatchPaused) == 0
 }
