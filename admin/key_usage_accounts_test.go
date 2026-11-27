@@ -473,6 +473,10 @@ func TestPublicAccountLimit(t *testing.T) {
 		{auth.AccountLiveUsageSnapshot{Status: "private diagnostic", CooldownUntil: later}, "cooldown", "cooldown", later},
 		{auth.AccountLiveUsageSnapshot{Status: "quota_paused", QuotaPauseWindow: "5h", Reset5hAt: later}, "quota_paused", "quota_paused_5h", later},
 		{auth.AccountLiveUsageSnapshot{Status: "rate_limited", UsagePercent7dValid: true, UsagePercent7d: 100, Reset7dAt: later, UsingCredits: true}, "rate_limited", "window_7d", later},
+		{auth.AccountLiveUsageSnapshot{Status: "rate_limited", UsagePercent5hValid: true, UsagePercent5h: 100, Reset5hAt: later, UsagePercent7dValid: true, UsagePercent7d: 100, CooldownUntil: now.Add(time.Minute)}, "rate_limited", "window_5h", later},
+		{auth.AccountLiveUsageSnapshot{Status: "rate_limited", UsagePercent7dValid: true, UsagePercent7d: 100, CooldownUntil: later}, "rate_limited", "window_7d", time.Time{}},
+		{auth.AccountLiveUsageSnapshot{Status: "rate_limited", UsagePercent5hValid: true, UsagePercent5h: 100, CooldownUntil: later}, "rate_limited", "window_5h", time.Time{}},
+		{auth.AccountLiveUsageSnapshot{Status: "rate_limited", UsagePercent5hValid: true, UsagePercent5h: 100, Reset5hAt: later, UsagePercent7dValid: true, UsagePercent7d: 100, Reset7dAt: later.Add(time.Hour)}, "rate_limited", "window_7d", later.Add(time.Hour)},
 		{auth.AccountLiveUsageSnapshot{Status: "active", Reset5hAt: later}, "active", "", time.Time{}},
 	} {
 		reason, reset := publicAccountLimit(tc.u, now)

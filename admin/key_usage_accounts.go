@@ -404,11 +404,21 @@ func publicAccountLimit(u auth.AccountLiveUsageSnapshot, now time.Time) (string,
 		reason, reset = "window_7d", u.Reset7dAt
 	case "rate_limited":
 		reason = "rate_limited"
-		if u.UsagePercent5hValid && u.UsagePercent5h >= 100 && u.Reset5hAt.After(now) {
-			reason, reset = "window_5h", u.Reset5hAt
+		considerWindow := func(exhausted bool, until time.Time, window string) {
+			if !exhausted {
+				return
+			}
+			if until.After(now) && until.After(reset) {
+				reason, reset = window, until
+			} else if until.IsZero() && reason == "rate_limited" {
+				reason = window
+			}
 		}
-		if u.UsagePercent7dValid && u.UsagePercent7d >= 100 && (u.Reset7dAt.IsZero() || u.Reset7dAt.After(now) && u.Reset7dAt.After(reset)) {
-			reason, reset = "window_7d", u.Reset7dAt
+		considerWindow(u.UsagePercent5hValid && u.UsagePercent5h >= 100, u.Reset5hAt, "window_5h")
+		considerWindow(u.UsagePercent7dValid && u.UsagePercent7d >= 100, u.Reset7dAt, "window_7d")
+		// A cooldown deadline alone cannot predict when an exhausted quota resets.
+		if reason != "rate_limited" && reset.IsZero() {
+			return reason, reset
 		}
 	case "responses_rate_limited", "usage_limit", "usage_limited", "upstream_429":
 		reason = "rate_limited"
