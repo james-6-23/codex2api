@@ -48,6 +48,7 @@ import (
 type Handler struct {
 	reauth                   scopedReauthStore
 	reauthExchange           scopedCodeExchange
+	accountImportFolders     accountImportFolderStore
 	intelligenceDeviceConfig *proxy.DeviceProfileConfig
 	intelligenceOnce         sync.Once
 	intelligenceWG           sync.WaitGroup
@@ -1171,6 +1172,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.Use(h.adminAuthMiddleware())
 	api.Use(func(c *gin.Context) {
 		c.Next()
+		if c.FullPath() == "/api/admin"+accountImportFolderRoute && c.Writer.Status() == http.StatusNoContent {
+			return // Staging, preparing, and cancelling do not change accounts.
+		}
 		if shouldInvalidateAccountSnapshotCaches(c.Request.Method, c.Request.URL.Path, c.Writer.Status()) {
 			h.invalidateAccountSnapshotCaches()
 		}
@@ -1239,6 +1243,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/accounts/:id/grok/auth-json", h.GetGrokAccountAuthJSON)
 	api.POST("/accounts/:id/oauth/exchange-code", h.UpdateOAuthAccountCode)
 	api.POST("/accounts/import", h.ImportAccounts)
+	api.POST(accountImportFolderRoute, h.importAccountFolder)
 	api.POST("/accounts/sub2api/preview", h.PreviewSub2APIAccounts)
 	api.POST("/accounts/sub2api/import", h.ImportFromSub2API)
 	api.PATCH("/accounts/:id/models", h.UpdateAccountModels)
@@ -1535,6 +1540,9 @@ func (h *Handler) adminAuthMiddleware() gin.HandlerFunc {
 			return
 		}
 		h.adminAuthThrottle.reset(clientIP)
+		if c.FullPath() == "/api/admin"+accountImportFolderRoute {
+			c.Set(accountImportOwnerKey, sha256.Sum256([]byte(adminKey)))
+		}
 
 		// 管理端响应包含 raw_key、auth.json、settings 等秘密，禁止中间缓存保存。
 		c.Header("Cache-Control", "no-store")
@@ -5484,29 +5492,25 @@ func importAccountCredentialFingerprint(row *database.AccountRow) string {
 	)
 }
 
-func conflictingImportChatGPTIDs(tokens []importToken) map[string]bool {
-	identitiesByID := make(map[string]map[string]struct{})
-	for _, t := range tokens {
-		id := strings.TrimSpace(t.chatgptAccountID)
-		if id == "" {
-			continue
-		}
-		identity := importTokenCredentialIdentity(t)
-		if identity == "" {
-			continue
-		}
-		identities := identitiesByID[id]
-		if identities == nil {
-			identities = make(map[string]struct{}, 1)
-			identitiesByID[id] = identities
-		}
-		identities[identity] = struct{}{}
-	}
-
+func conflictingImportChatGPTIDs(batches ...[]importToken) map[string]bool {
+	firstByID := make(map[string][32]byte)
 	conflicts := make(map[string]bool)
-	for id, identities := range identitiesByID {
-		if len(identities) > 1 {
-			conflicts[id] = true
+	for _, tokens := range batches {
+		for _, t := range tokens {
+			id := strings.TrimSpace(t.chatgptAccountID)
+			if id == "" || conflicts[id] {
+				continue
+			}
+			identity := importTokenCredentialIdentity(t)
+			if identity == "" {
+				continue
+			}
+			digest := sha256.Sum256([]byte(identity))
+			if first, ok := firstByID[id]; ok && first != digest {
+				conflicts[id] = true
+			} else {
+				firstByID[id] = digest
+			}
 		}
 	}
 	return conflicts
@@ -5546,28 +5550,89 @@ func importTokenSeed(t importToken, conflicts map[string]bool) tokenCredentialSe
 	})
 }
 
-func importTokenOAuthIdentityKey(t importToken, conflicts map[string]bool) string {
-	seed := importTokenSeed(t, conflicts)
+func (g *importOAuthIdentityGuard) key(t importToken) string {
+	seed := importTokenSeed(t, g.exportIDs)
 	email := strings.ToLower(strings.TrimSpace(seed.email))
-	workspaceID := strings.TrimSpace(seed.workspaceID)
+	workspaceID := openaiidentity.EffectiveWorkspaceID(seed.workspaceID, g.customHeaders)
 	if email == "" || workspaceID == "" {
 		return ""
 	}
 	return email + "\x00" + workspaceID
 }
 
+type importOAuthIdentityState struct {
+	first       [32]byte
+	conflicting bool
+}
+
+type importOAuthIdentityGuard struct {
+	exportIDs     map[string]bool
+	customHeaders map[string]string
+	states        map[[32]byte]importOAuthIdentityState
+	seen          map[[32]byte]bool
+}
+
+func newImportOAuthIdentityGuard(exportIDs map[string]bool, customHeaders map[string]string) *importOAuthIdentityGuard {
+	return &importOAuthIdentityGuard{
+		exportIDs:     exportIDs,
+		customHeaders: customHeaders,
+		states:        make(map[[32]byte]importOAuthIdentityState),
+		seen:          make(map[[32]byte]bool),
+	}
+}
+
+func (g *importOAuthIdentityGuard) collect(tokens []importToken) {
+	for _, token := range tokens {
+		if token.isAgentIdentity() {
+			continue
+		}
+		identity := g.key(token)
+		if identity == "" {
+			continue
+		}
+		key := sha256.Sum256([]byte(identity))
+		state, exists := g.states[key]
+		if state.conflicting {
+			continue
+		}
+		fingerprint := sha256.Sum256([]byte(importTokenCredentialFingerprint(token, g.exportIDs)))
+		if !exists {
+			g.states[key] = importOAuthIdentityState{first: fingerprint}
+		} else if state.first != fingerprint {
+			g.states[key] = importOAuthIdentityState{conflicting: true}
+		}
+	}
+}
+
 // ImportAccounts 批量导入账号（支持 TXT / JSON）
 func (h *Handler) ImportAccounts(c *gin.Context) {
+	format, settings, ok := h.accountImportOptions(c)
+	if !ok {
+		return
+	}
+	switch format {
+	case "json":
+		h.importAccountsJSON(c, settings)
+	case "json_at":
+		h.importAccountsJSONPreferAT(c, settings)
+	case "at_txt":
+		h.importAccountsATTXT(c, settings)
+	default:
+		h.importAccountsTXT(c, settings)
+	}
+}
+
+func (h *Handler) accountImportOptions(c *gin.Context) (string, importSettings, bool) {
 	format := c.DefaultPostForm("format", "txt")
 	customHeaders, err := parseCustomHeadersForm(c.PostForm("custom_headers"))
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
-		return
+		return "", importSettings{}, false
 	}
 	timezone := strings.TrimSpace(c.PostForm("timezone"))
 	if err := validateAccountTimezone(timezone); err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
-		return
+		return "", importSettings{}, false
 	}
 	settings := importSettings{
 		defaultProxyURL: c.PostForm("proxy_url"),
@@ -5584,20 +5649,10 @@ func (h *Handler) ImportAccounts(c *gin.Context) {
 	groupCancel()
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
-		return
+		return "", importSettings{}, false
 	}
 	c.Set(importGroupIDsContextKey, groupIDs)
-
-	switch format {
-	case "json":
-		h.importAccountsJSON(c, settings)
-	case "json_at":
-		h.importAccountsJSONPreferAT(c, settings)
-	case "at_txt":
-		h.importAccountsATTXT(c, settings)
-	default:
-		h.importAccountsTXT(c, settings)
-	}
+	return format, settings, true
 }
 
 // parseBoolForm 解析表单中的布尔开关（1/true/yes/on 视为真）。
@@ -5698,70 +5753,62 @@ func (h *Handler) importAccountsTXT(c *gin.Context, settings importSettings) {
 
 // importAccountsJSON 通过 JSON 文件导入（兼容 CLIProxyAPI 凭证格式）
 func (h *Handler) importAccountsJSON(c *gin.Context, settings importSettings) {
-	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
-		writeError(c, http.StatusBadRequest, "解析表单失败")
-		return
-	}
-
-	files := c.Request.MultipartForm.File["file"]
-	if len(files) == 0 {
-		writeError(c, http.StatusBadRequest, "请上传至少一个 JSON 文件")
-		return
-	}
-
-	var allTokens []importToken
-
-	for _, fh := range files {
-		if err := validateImportFileSize(fh); err != nil {
-			writeError(c, http.StatusBadRequest, err.Error())
-			return
-		}
-
-		tokens, err := parseUploadedImportJSONFile(fh)
-		if err != nil {
-			writeError(c, http.StatusBadRequest, fmt.Sprintf("文件 %s 不是有效的 JSON 格式", fh.Filename))
-			return
-		}
-
-		allTokens = append(allTokens, tokens...)
-	}
-
-	if len(allTokens) == 0 {
-		writeError(c, http.StatusBadRequest, "JSON 文件中未找到有效的 refresh_token 或 access_token")
-		return
-	}
-
-	h.importAccountsCommon(c, allTokens, settings)
+	h.importAccountsJSONWithMode(c, settings, false)
 }
 
 // importAccountsJSONPreferAT 通过 JSON 文件导入，但只信任 access_token，
 // 用于一些导出工具中 refresh_token / session_token 是占位/重复值的场景。
 func (h *Handler) importAccountsJSONPreferAT(c *gin.Context, settings importSettings) {
-	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
-		writeError(c, http.StatusBadRequest, "解析表单失败")
+	h.importAccountsJSONWithMode(c, settings, true)
+}
+
+func (h *Handler) importAccountsJSONWithMode(c *gin.Context, settings importSettings, preferAT bool) {
+	files, err := jsonImportFiles(c)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	tokens, err := parseJSONImportFiles(files, preferAT)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(tokens) == 0 {
+		message := "JSON 文件中未找到有效的 refresh_token 或 access_token"
+		if preferAT {
+			message = "JSON 文件中未找到有效的 access_token"
+		}
+		writeError(c, http.StatusBadRequest, message)
+		return
+	}
+	h.importAccountsCommon(c, tokens, settings)
+}
 
+func jsonImportFiles(c *gin.Context) ([]*multipart.FileHeader, error) {
+	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
+		return nil, errors.New("解析表单失败")
+	}
 	files := c.Request.MultipartForm.File["file"]
 	if len(files) == 0 {
-		writeError(c, http.StatusBadRequest, "请上传至少一个 JSON 文件")
-		return
+		return nil, errors.New("请上传至少一个 JSON 文件")
 	}
+	return files, nil
+}
 
+func parseJSONImportFiles(files []*multipart.FileHeader, preferAT bool) ([]importToken, error) {
 	var allTokens []importToken
-
 	for _, fh := range files {
 		if err := validateImportFileSize(fh); err != nil {
-			writeError(c, http.StatusBadRequest, err.Error())
-			return
+			return nil, err
 		}
-
 		tokens, err := parseUploadedImportJSONFile(fh)
 		if err != nil {
-			writeError(c, http.StatusBadRequest, fmt.Sprintf("文件 %s 不是有效的 JSON 格式", fh.Filename))
-			return
+			return nil, fmt.Errorf("文件 %s 不是有效的 JSON 格式", fh.Filename)
 		}
-
+		if !preferAT {
+			allTokens = append(allTokens, tokens...)
+			continue
+		}
 		for _, t := range tokens {
 			if strings.TrimSpace(t.accessToken) == "" {
 				continue
@@ -5771,13 +5818,7 @@ func (h *Handler) importAccountsJSONPreferAT(c *gin.Context, settings importSett
 			allTokens = append(allTokens, t)
 		}
 	}
-
-	if len(allTokens) == 0 {
-		writeError(c, http.StatusBadRequest, "JSON 文件中未找到有效的 access_token")
-		return
-	}
-
-	h.importAccountsCommon(c, allTokens, settings)
+	return allTokens, nil
 }
 
 // importEvent SSE 导入进度事件
@@ -5866,9 +5907,10 @@ func sendSSEJSON(c *gin.Context, event any) bool {
 
 // importAccountsCommon 公共的去重、并发插入、SSE 进度推送逻辑（支持 RT 和 AT-only 混合导入）
 func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, settings importSettings) {
-	importCustomHeaders := settings.customHeaders
-	allowDuplicate := settings.allowDuplicate
+	h.commitAccountImportBatch(c, tokens, settings, nil)
+}
 
+func (h *Handler) commitAccountImportBatch(c *gin.Context, tokens []importToken, settings importSettings, identities *importOAuthIdentityGuard) bool {
 	// 代理注册必须跑在任何账号入库之前——包括下面的 Agent Identity 分支。
 	// registerImportedProxies 会原地规范化 tokens 上的代理 URL，失败则整次导入
 	// 中止：继续写只会产出一批绑着未入池代理、因而不可调度的账号。
@@ -5879,11 +5921,23 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 		outcome, err := h.registerImportedProxies(proxyCtx, tokens)
 		proxyCancel()
 		if err != nil {
-			writeError(c, http.StatusInternalServerError, "导入代理失败，未写入任何账号: "+err.Error())
-			return
+			message := "导入代理失败，未写入任何账号: " + err.Error()
+			if identities != nil {
+				message = "导入代理失败，未写入本批次账号"
+			}
+			writeError(c, http.StatusInternalServerError, message)
+			return false
 		}
 		proxyOutcome = outcome
 	}
+
+	h.writeImportedAccounts(c, tokens, settings, proxyOutcome, identities)
+	return true
+}
+
+func (h *Handler) writeImportedAccounts(c *gin.Context, tokens []importToken, settings importSettings, proxyOutcome importProxyOutcome, identities *importOAuthIdentityGuard) {
+	importCustomHeaders := settings.customHeaders
+	allowDuplicate := settings.allowDuplicate
 
 	// Agent Identity 条目单独处理（无 RT/ST/AT，按 runtime_id 去重、动态签名），
 	// 从常规 token 流里拆出，计数在收尾时并入总响应。
@@ -5910,47 +5964,29 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 	// 2) 没有 OAuth 身份时，退回到 RT / ST / AT 顺序去重（兼容旧导出格式）。
 	// 3) 同一份文件内若出现"同一个 RT 对应多个不同 chatgpt_account_id"，
 	//    会被全部保留为独立账号；数据库层面 refresh_token 没有 UNIQUE 约束，因此安全。
-	conflictingChatGPTIDs := conflictingImportChatGPTIDs(tokens)
-	type oauthIdentityImportState struct {
-		count        int
-		fingerprints map[string]struct{}
+	if identities == nil {
+		// The legacy single-request API keeps its JWT-based file dedupe semantics.
+		identities = newImportOAuthIdentityGuard(conflictingImportChatGPTIDs(tokens), nil)
+		identities.collect(tokens)
 	}
-	oauthIdentityStates := make(map[string]*oauthIdentityImportState)
-	for _, t := range tokens {
-		oauthIdentity := importTokenOAuthIdentityKey(t, conflictingChatGPTIDs)
-		if oauthIdentity == "" {
-			continue
-		}
-		state := oauthIdentityStates[oauthIdentity]
-		if state == nil {
-			state = &oauthIdentityImportState{fingerprints: make(map[string]struct{}, 1)}
-			oauthIdentityStates[oauthIdentity] = state
-		}
-		state.count++
-		state.fingerprints[importTokenCredentialFingerprint(t, conflictingChatGPTIDs)] = struct{}{}
-	}
-
-	seenOAuthIdentity := make(map[string]bool)
+	conflictingChatGPTIDs := identities.exportIDs
 	seenRT := make(map[string]bool)
 	seenST := make(map[string]bool)
 	seenAT := make(map[string]bool)
 	var unique []importToken
 	ambiguousOAuthIdentityCount := 0
 	for _, t := range tokens {
-		oauthIdentity := importTokenOAuthIdentityKey(t, conflictingChatGPTIDs)
+		oauthIdentity := identities.key(t)
 		if oauthIdentity != "" {
-			state := oauthIdentityStates[oauthIdentity]
-			if state != nil && len(state.fingerprints) > 1 {
-				if !seenOAuthIdentity[oauthIdentity] {
-					ambiguousOAuthIdentityCount += state.count
-					seenOAuthIdentity[oauthIdentity] = true
-				}
+			key := sha256.Sum256([]byte(oauthIdentity))
+			if identities.states[key].conflicting {
+				ambiguousOAuthIdentityCount++
 				continue
 			}
-			if seenOAuthIdentity[oauthIdentity] {
+			if identities.seen[key] {
 				continue
 			}
-			seenOAuthIdentity[oauthIdentity] = true
+			identities.seen[key] = true
 			if t.refreshToken != "" {
 				seenRT[t.refreshToken] = true
 			}
@@ -6022,7 +6058,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 	if allowDuplicate && !workspaceOverrideKnown {
 		knownCount := 0
 		for _, t := range tokens {
-			if importTokenOAuthIdentityKey(t, conflictingChatGPTIDs) == "" {
+			if identities.key(t) == "" {
 				newTokens = append(newTokens, t)
 			} else {
 				knownCount++
@@ -6030,7 +6066,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 		}
 		knownUniqueCount := 0
 		for _, t := range unique {
-			if importTokenOAuthIdentityKey(t, conflictingChatGPTIDs) != "" {
+			if identities.key(t) != "" {
 				knownUniqueCount++
 				seed := importTokenSeed(t, conflictingChatGPTIDs)
 				seed.customHeaders = cloneCustomHeaders(importCustomHeaders)
