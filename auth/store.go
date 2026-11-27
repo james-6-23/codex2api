@@ -2483,6 +2483,12 @@ func cooldownMatchesReset(cooldownUntil, resetAt time.Time) bool {
 // Authentication failures retain the higher priority used by the runtime cache.
 // The caller must hold a.mu.
 func (a *Account) usageCooldownTargetLocked(now, resetAt time.Time, reason string) (time.Time, string, bool) {
+	// An expired 401 is eligible for verification, not for replacement by a
+	// quota cooldown. While it is active, the normal max-deadline rule below
+	// can extend it without changing the authorization reason.
+	if a.hasCodexAuthorizationCooldownLocked() && !now.Before(a.CooldownUtil) {
+		return a.CooldownUtil, a.CooldownReason, false
+	}
 	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) {
 		if reason == ResponsesRateLimitedCooldownReason && a.usageWindowCooldownLocked() {
 			if resetAt.Before(a.CooldownUtil) {
@@ -3761,8 +3767,8 @@ func (a *Account) NeedsUsageProbe(maxAge time.Duration) bool {
 	if a.isRelayStyleLocked() && !a.isClaudeOAuthLocked() {
 		return false // wham 探针是 ChatGPT 专属；中转/Grok 账号没有该端点
 	}
-	if a.Status == StatusCooldown && a.CooldownReason == "unauthorized" && (a.CooldownUtil.IsZero() || now.Before(a.CooldownUtil)) {
-		return false // token 失效，wham 也会 401，探针无意义
+	if a.hasCodexAuthorizationCooldownLocked() || (a.Status == StatusCooldown && a.CooldownReason == "unauthorized" && (a.CooldownUtil.IsZero() || now.Before(a.CooldownUtil))) {
+		return false // A native Codex 401 is verified by the dedicated recovery probe.
 	}
 	// Claude uses the native Messages endpoint rather than WHAM and may legally
 	// omit both unified quota windows. In that case the shared 7d validity bits
@@ -3918,7 +3924,14 @@ func (a *Account) NeedsRecoveryProbe(minInterval time.Duration) bool {
 	if a.isRelayStyleLocked() {
 		return false // 恢复探测走 ChatGPT 探针；中转/Grok 账号不适用
 	}
-	if a.RefreshToken == "" {
+	if a.isNativeCodexBearerLocked() && a.Status == StatusError {
+		return false
+	}
+	if a.hasCodexAuthorizationCooldownLocked() {
+		if !a.hasUsableCodexProbeTokenLocked(time.Now()) && strings.TrimSpace(a.RefreshToken) == "" {
+			return false
+		}
+	} else if a.RefreshToken == "" {
 		return false
 	}
 	if a.PermanentRefreshFailures >= permanentRefreshFailureTerminalLimit {
@@ -6449,11 +6462,17 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		}
 	}
 	account.subscriptionMeta = SubscriptionMetaFromCredentials(row.GetCredential)
-	if row.CooldownUntil.Valid {
-		if time.Now().Before(row.CooldownUntil.Time) {
+	nativeCodex := account.isNativeCodexBearerLocked()
+	if row.CooldownUntil.Valid && (!nativeCodex || account.Status != StatusError) {
+		// An expired native Codex 401 permits verification, not dispatch.
+		keepUnauthorized := nativeCodex && row.CooldownReason == "unauthorized"
+		if keepUnauthorized || time.Now().Before(row.CooldownUntil.Time) {
 			account.SetCooldownUntil(row.CooldownUntil.Time, row.CooldownReason)
+			if keepUnauthorized {
+				account.ErrorMsg = row.ErrorMessage
+			}
 		} else if row.CooldownReason != "" {
-			if err := s.db.ClearCooldown(ctx, row.ID); err != nil {
+			if _, err := s.db.ClearCooldownIfReasonAndUntil(ctx, row.ID, row.CooldownReason, row.CooldownUntil.Time); err != nil {
 				log.Printf("[账号 %d] 清理过期冷却状态失败: %v", row.ID, err)
 			}
 		}
@@ -12395,6 +12414,13 @@ func (s *Store) parallelRecoveryProbe(ctx context.Context) {
 
 			probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
+			account.mu.RLock()
+			codex401 := account.hasCodexAuthorizationCooldownLocked()
+			account.mu.RUnlock()
+			if codex401 {
+				s.probeCodexAuthorization(probeCtx, account, probeFn)
+				return
+			}
 
 			if account.NeedsRefresh() {
 				if err := s.refreshAccount(probeCtx, account); err != nil {
@@ -12405,16 +12431,19 @@ func (s *Store) parallelRecoveryProbe(ctx context.Context) {
 			if err := probeFn(probeCtx, account); err != nil {
 				log.Printf("[账号 %d] 恢复探测失败: %v", account.DBID, err)
 			} else {
+				account.mu.Lock()
+				// A 401 observed during a legacy probe still needs dedicated evidence.
+				if account.hasCodexAuthorizationCooldownLocked() {
+					account.mu.Unlock()
+					return
+				}
 				// 用量已耗尽的账号不重置状态
-				account.mu.RLock()
-				exhausted := account.usageExhaustedLocked()
-				account.mu.RUnlock()
-				if exhausted {
+				if account.usageExhaustedLocked() {
+					account.mu.Unlock()
 					log.Printf("[账号 %d] 恢复探测成功但用量已耗尽，保持当前状态", account.DBID)
 				} else {
 					// 探测成功：将账号从 banned 升级到 warm，给予重新调度的机会
 					atomic.StoreInt32(&account.Disabled, 0) // 清除原子禁用标志
-					account.mu.Lock()
 					if account.HealthTier == HealthTierBanned {
 						account.HealthTier = HealthTierWarm
 						account.SchedulerScore = 80

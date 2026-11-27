@@ -330,14 +330,17 @@ func (s *Store) publishCodexRefresh(ctx context.Context, acc *Account) error {
 func (s *Store) finishCodexRefresh(ctx context.Context, acc *Account, warning string) {
 	acc.mu.Lock()
 	now := time.Now()
-	if acc.Status != StatusCooldown || !now.Before(acc.CooldownUtil) {
-		acc.Status = StatusReady
-		acc.CooldownUtil, acc.CooldownReason = time.Time{}, ""
-		if acc.HealthTier == HealthTierBanned {
-			acc.HealthTier = HealthTierWarm
+	// A refreshed token isn't evidence that the upstream 401 is gone.
+	if !acc.hasCodexAuthorizationCooldownLocked() {
+		if acc.Status != StatusCooldown || !now.Before(acc.CooldownUtil) {
+			acc.Status = StatusReady
+			acc.CooldownUtil, acc.CooldownReason = time.Time{}, ""
+			if acc.HealthTier == HealthTierBanned {
+				acc.HealthTier = HealthTierWarm
+			}
 		}
+		acc.ErrorMsg = warning
 	}
-	acc.ErrorMsg = warning
 	acc.recomputeSchedulerLocked(s.maxConcurrency.Load())
 	at, expiry, id := acc.AccessToken, acc.ExpiresAt, acc.DBID
 	acc.mu.Unlock()
@@ -346,6 +349,115 @@ func (s *Store) finishCodexRefresh(ctx context.Context, acc *Account, warning st
 			log.Printf("[账号 %d] 新凭据已保存，更新 Token 缓存失败: %v", id, err)
 		}
 	}
+	s.fastSchedulerUpdate(acc)
+}
+
+func (a *Account) isNativeCodexBearerLocked() bool {
+	upstream := strings.TrimSpace(a.UpstreamType)
+	return (upstream == "" || strings.EqualFold(upstream, "codex")) && !a.isCodexAgentIdentityLocked()
+}
+
+func (a *Account) hasCodexAuthorizationCooldownLocked() bool {
+	return a.Status == StatusCooldown && a.CooldownReason == "unauthorized" && a.isNativeCodexBearerLocked()
+}
+
+func (a *Account) hasUsableCodexProbeTokenLocked(now time.Time) bool {
+	return strings.TrimSpace(a.AccessToken) != "" && (a.ExpiresAt.IsZero() || now.Before(a.ExpiresAt))
+}
+
+type codexAuthorizationProbeKey struct{}
+
+type codexAuthorizationProbe struct {
+	account *Account
+	success atomic.Bool
+}
+
+// IsCodexAuthorizationRecoveryProbe distinguishes a single scheduled 401
+// probe from ordinary usage sampling, which may handle failures and return nil.
+func IsCodexAuthorizationRecoveryProbe(ctx context.Context, account *Account) bool {
+	probe, _ := ctx.Value(codexAuthorizationProbeKey{}).(*codexAuthorizationProbe)
+	return probe != nil && probe.account == account
+}
+
+// ReportCodexAuthorizationProbeSuccess records explicit upstream evidence only
+// for this probe; a concurrent request's normal success metrics cannot set it.
+func ReportCodexAuthorizationProbeSuccess(ctx context.Context, account *Account) {
+	if IsCodexAuthorizationRecoveryProbe(ctx, account) {
+		ctx.Value(codexAuthorizationProbeKey{}).(*codexAuthorizationProbe).success.Store(true)
+	}
+}
+
+func (s *Store) probeCodexAuthorization(ctx context.Context, acc *Account, probeFn func(context.Context, *Account) error) {
+	acc.mu.RLock()
+	until, unauthorizedAt := acc.CooldownUtil, acc.LastUnauthorizedAt
+	matchesCooldown := func() bool {
+		return acc.hasCodexAuthorizationCooldownLocked() && acc.CooldownUtil.Equal(until) && !time.Now().Before(until) &&
+			acc.LastUnauthorizedAt.Equal(unauthorizedAt) && acc.PermanentRefreshFailures < permanentRefreshFailureTerminalLimit
+	}
+	if !matchesCooldown() {
+		acc.mu.RUnlock()
+		return
+	}
+	refresh := strings.TrimSpace(acc.RefreshToken) != "" && (acc.AccessToken == "" || time.Until(acc.ExpiresAt) < 5*time.Minute)
+	acc.mu.RUnlock()
+	if refresh {
+		if err := s.refreshAccount(ctx, acc); err != nil {
+			log.Printf("[账号 %d] 恢复探测前刷新失败: %v", acc.DBID, err)
+		}
+	}
+	acc.mu.RLock()
+	usable := matchesCooldown() && acc.hasUsableCodexProbeTokenLocked(time.Now())
+	generation, at, detail := acc.CredentialGeneration, acc.AccessToken, acc.ErrorMsg
+	acc.mu.RUnlock()
+	if !usable || ctx.Err() != nil {
+		return
+	}
+	probe := &codexAuthorizationProbe{account: acc}
+	if err := probeFn(context.WithValue(ctx, codexAuthorizationProbeKey{}, probe), acc); err != nil {
+		log.Printf("[账号 %d] 恢复探测失败: %v", acc.DBID, err)
+		return
+	}
+	if !probe.success.Load() || ctx.Err() != nil {
+		return
+	}
+	// Serialize with cooldown publication, then hold the account lock through
+	// the durable comparison so a local 401 or credential change cannot interleave.
+	s.accountMutationMu.Lock()
+	defer s.accountMutationMu.Unlock()
+	if s.FindByID(acc.DBID) != acc {
+		return
+	}
+	acc.usageCooldownPersistMu.Lock()
+	defer acc.usageCooldownPersistMu.Unlock()
+	acc.mu.Lock()
+	if !matchesCooldown() || acc.CredentialGeneration != generation || acc.AccessToken != at || acc.ErrorMsg != detail ||
+		!acc.hasUsableCodexProbeTokenLocked(time.Now()) || acc.usageExhaustedLocked() || acc.premium5hRateLimitedLocked(time.Now()) {
+		acc.mu.Unlock()
+		return
+	}
+	if s.db != nil {
+		writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		cleared, err := s.db.ClearCodexAuthorizationCooldown(writeCtx, acc.DBID, generation, at, until, detail)
+		cancel()
+		if err != nil || !cleared {
+			acc.mu.Unlock()
+			if err != nil {
+				log.Printf("[账号 %d] 持久化鉴权恢复失败: %v", acc.DBID, err)
+			}
+			return
+		}
+	}
+	acc.Status, acc.HealthTier = StatusReady, HealthTierWarm
+	acc.CooldownUtil, acc.CooldownReason, acc.ErrorMsg = time.Time{}, "", ""
+	acc.usageCooldownPersistPending, acc.usageCooldownClearErrorPending = false, false
+	acc.LastSuccessAt = time.Now()
+	acc.FailureStreak, acc.SuccessStreak = 0, 1
+	acc.recordResultLocked(true)
+	atomic.StoreInt32(&acc.Disabled, 0)
+	acc.recomputeSchedulerLocked(s.maxConcurrency.Load())
+	acc.mu.Unlock()
+	// The replaced cooldown's cache entry has expired. Do not delete a possibly
+	// newer shared-cache record from a different instance.
 	s.fastSchedulerUpdate(acc)
 }
 

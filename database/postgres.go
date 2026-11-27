@@ -8813,6 +8813,15 @@ func (db *DB) SetCooldownWithError(ctx context.Context, id int64, reason string,
 	})
 }
 
+// ReplaceErrorWithCooldown publishes a pending error clear and the current
+// cooldown in one write. Ordinary cooldown updates must not clear terminal errors.
+func (db *DB) ReplaceErrorWithCooldown(ctx context.Context, id int64, reason string, until time.Time, errorMsg string) error {
+	return db.withSQLiteWriteLock(ctx, func() error {
+		_, err := db.conn.ExecContext(ctx, `UPDATE accounts SET status = 'active', cooldown_reason = $1, cooldown_until = $2, error_message = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $4 AND status IN ('active','error') AND COALESCE(error_message,'') <> 'deleted'`, reason, until, errorMsg, id)
+		return err
+	})
+}
+
 // ClearCooldown 清除账号冷却状态
 func (db *DB) ClearCooldown(ctx context.Context, id int64) error {
 	return db.withSQLiteWriteLock(ctx, func() error {

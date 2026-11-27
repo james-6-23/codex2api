@@ -46,7 +46,10 @@ func (s *Store) persistAccountCooldownState(acc *Account, force, clearError bool
 	if s.db != nil {
 		switch status {
 		case StatusCooldown:
-			if errorMsg != "" {
+			if clearError {
+				// A newer cooldown superseded an error clear that never reached the DB.
+				err = s.db.ReplaceErrorWithCooldown(ctx, acc.DBID, reason, until, errorMsg)
+			} else if errorMsg != "" {
 				err = s.db.SetCooldownWithError(ctx, acc.DBID, reason, until, errorMsg)
 			} else {
 				err = s.db.SetCooldown(ctx, acc.DBID, reason, until)
@@ -71,7 +74,7 @@ func (s *Store) persistAccountCooldownState(acc *Account, force, clearError bool
 		// Preserve the operation as well as the dirty bit. ClearCooldown does
 		// not remove a persisted error, so it cannot retry a failed ClearError.
 		// The status switch above still gives newer errors/cooldowns priority.
-		acc.usageCooldownClearErrorPending = clearError && status != StatusError && status != StatusCooldown
+		acc.usageCooldownClearErrorPending = clearError && status != StatusError
 		acc.mu.Unlock()
 		return
 	}
