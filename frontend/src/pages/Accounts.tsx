@@ -1,3 +1,4 @@
+import AccountResetCreditBadge from "../components/AccountResetCreditBadge";
 import AccountReauthorizationForm from "../components/AccountReauthorizationForm";
 import { parseOAuthCallbackParams } from "../utils/oauthCallback";
 import { copyTextToClipboard } from "../utils/copyTextToClipboard";
@@ -13950,17 +13951,7 @@ function AccountMobileCard({
                 </>
               )}
               <DaybreakBadge models={account.daybreak_models} />
-              {isFullCard && resetCredits > 0 && (
-                <button
-                  type="button"
-                  onClick={onUsage}
-                  className="codex-account-card__flag codex-account-card__flag--clickable"
-                  title={t("accounts.resetCreditsBadge", { count: resetCredits })}
-                >
-                  <RotateCcw className="size-3" />
-                  {resetCredits}
-                </button>
-              )}
+              {isFullCard && <AccountResetCreditBadge count={resetCredits} onClick={onUsage} />}
               {isFullCard && creditBalance !== null && (
                 <button
                   type="button"

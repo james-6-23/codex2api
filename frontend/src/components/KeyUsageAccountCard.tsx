@@ -1,3 +1,5 @@
+import { useState } from "react";
+import AccountResetCreditBadge from "./AccountResetCreditBadge";
 import KeyUsageReauthDialog from "./KeyUsageReauthDialog";
 import {
   AccountDetailContent,
@@ -9,7 +11,6 @@ import { useTranslation } from "react-i18next";
 import {
   Clock3,
   RotateCcw,
-  Ticket,
   Eye,
   Activity,
   Wallet,
@@ -54,6 +55,7 @@ export default function KeyUsageAccountCard({
   onRefresh: () => void;
 }) {
   const { t } = useTranslation();
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const displayName = account.email || account.name || `#${account.id}`;
   const updated = [account.usage_updated_at_5h, account.usage_updated_at_7d]
     .filter(
@@ -123,15 +125,7 @@ export default function KeyUsageAccountCard({
           <>
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <PlanBadge planType={account.plan_type} />
-              <span
-                className="codex-account-card__flag"
-                title={t("keyUsageAccounts.cards")}
-              >
-                <Ticket className="size-3" />
-                {t("keyUsageAccounts.cardCount", {
-                  value: account.reset_credits ?? t("keyUsageAccounts.unknown"),
-                })}
-              </span>
+              <AccountResetCreditBadge count={account.reset_credits} onClick={() => setDetailsOpen(true)} />
               {credit && (
                 <span
                   className="codex-account-card__flag"
@@ -241,7 +235,7 @@ export default function KeyUsageAccountCard({
         />
       </dl>
       <footer className="codex-account-card__actions codex-account-card__actions--portal">
-        <Sheet>
+        <Sheet open={detailsOpen} onOpenChange={setDetailsOpen}>
           <SheetTrigger asChild>
             <Button
               variant="ghost"
@@ -313,7 +307,7 @@ export default function KeyUsageAccountCard({
                     )}
                   </AccountDetailMetric>
                   <AccountDetailMetric label={t("keyUsageAccounts.cards")}>
-                    {account.reset_credits ?? "—"}
+                    {account.reset_credits ?? t("keyUsageAccounts.unknown")}
                   </AccountDetailMetric>
                 </div>
               </AccountDetailSection>
