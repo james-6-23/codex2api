@@ -1521,6 +1521,15 @@ func (h *Handler) adminAuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		// 未携带密钥不是一次猜测，不计入失败次数：未登录时每次加载管理页都会
+		// 无密钥探测 /api/admin/health，若计数，连续刷新几次登录页就会把本机 IP 锁死。
+		if strings.TrimSpace(adminKey) == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error": "管理密钥无效或缺失",
+			})
+			return
+		}
+
 		// 清理输入
 		adminKey = security.SanitizeInput(adminKey)
 

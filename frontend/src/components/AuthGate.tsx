@@ -106,6 +106,8 @@ const COPY = {
     loginSubtitle: '请输入管理密钥登录',
     loginPlaceholder: '请输入 ADMIN_SECRET',
     loginError: '密钥错误，请重新输入',
+    loginThrottled: '登录失败次数过多，已暂时锁定，请 {{minutes}} 分钟后再试',
+    loginThrottledNoTime: '登录失败次数过多，已暂时锁定，请稍后再试',
     loginButton: '登录',
     loadingText: '加载中…',
   },
@@ -164,6 +166,8 @@ const COPY = {
     loginSubtitle: 'Enter your admin secret to sign in',
     loginPlaceholder: 'Enter ADMIN_SECRET',
     loginError: 'Invalid secret, please try again',
+    loginThrottled: 'Too many failed attempts. Sign-in is temporarily locked; try again in {{minutes}} min',
+    loginThrottledNoTime: 'Too many failed attempts. Sign-in is temporarily locked; please try again later',
     loginButton: 'Sign in',
     loadingText: 'Loading…',
   },
@@ -528,6 +532,14 @@ export default function AuthGate({ children }: PropsWithChildren) {
       })
       if (res.status === 401) {
         setError(copy.loginError)
+      } else if (res.status === 429) {
+        // 后端按 IP 锁定：锁定期间不比对密钥，正确密钥也会被拒，不能提示成"密钥错误"。
+        const retrySeconds = Number.parseInt(res.headers.get('Retry-After') ?? '', 10)
+        setError(
+          Number.isFinite(retrySeconds) && retrySeconds > 0
+            ? interpolate(copy.loginThrottled, { minutes: Math.ceil(retrySeconds / 60) })
+            : copy.loginThrottledNoTime,
+        )
       } else if (res.status === 503) {
         setStatus('need_bootstrap')
       } else if (!res.ok) {

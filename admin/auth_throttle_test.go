@@ -107,6 +107,30 @@ func TestAdminAuthMiddlewareThrottlesFailedAttempts(t *testing.T) {
 	}
 }
 
+func TestAdminAuthMiddlewareMissingKeyDoesNotCountAsFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, _ := newSelfServiceHandler(t, false)
+	router := gin.New()
+	handler.RegisterRoutes(router)
+
+	// 未登录的管理页每次加载都会无密钥探测 health；反复刷新不能把 IP 锁住。
+	for i := 0; i < adminAuthMaxFailures*3; i++ {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/admin/health", nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("keyless probe %d returned %d, want 401", i+1, rec.Code)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/health", nil)
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("correct key after keyless probes returned %d, want 200", rec.Code)
+	}
+}
+
 func TestAdminAuthThrottleBoundsTrackedIPs(t *testing.T) {
 	throttle := newAdminAuthThrottle()
 	now := time.Unix(1_700_000_000, 0)
