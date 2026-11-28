@@ -1973,6 +1973,10 @@ export interface SystemUpdateInfo {
   runtime_os: string
   runtime_arch: string
   mode: string
+  build_type?: 'release' | 'dev' | 'custom' | string
+  deployment_mode?: 'docker' | 'binary' | string
+  release_name?: string
+  release_notes?: string
   release_url?: string
   asset_name?: string
   published_at?: string

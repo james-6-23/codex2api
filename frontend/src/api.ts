@@ -1325,7 +1325,8 @@ export const api = {
     request<MessageResponse>(`/prompt-filter/newapi-bindings/${apiKeyId}`, { method: 'DELETE' }),
   getOpsOverview: (signal?: AbortSignal) => request<OpsOverviewResponse>('/ops/overview', { signal }),
   getRuntimeStatus: () => request<RuntimeStatusResponse>('/runtime-status'),
-  getSystemUpdate: () => request<SystemUpdateInfo>('/system/update', { timeoutMs: 20_000 }),
+  getSystemUpdate: (options?: { force?: boolean }) =>
+    request<SystemUpdateInfo>(options?.force ? '/system/update?force=1' : '/system/update', { timeoutMs: 20_000 }),
   performSystemUpdate: () =>
     // 后端下载上游二进制最长约 10 分钟,客户端给到 11 分钟兜底:既不会误伤慢下载,
     // 又能保证请求最终有界返回,不会无限期卡在“更新中”。

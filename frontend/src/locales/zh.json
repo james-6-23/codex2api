@@ -738,6 +738,46 @@
     "capabilityUnrouted": "尚无可路由 backend",
     "capabilityUntested": "未探测"
   },
+  "systemUpdate": {
+    "title": "系统更新",
+    "description": "检查版本、查看发布说明并执行在线更新",
+    "application": "应用包更新",
+    "currentVersionLabel": "当前版本",
+    "latestVersionLabel": "最新版本",
+    "buildLabel": "构建",
+    "deploymentLabel": "部署",
+    "platformLabel": "平台",
+    "publishedAtLabel": "发布日期",
+    "channelLabel": "通道",
+    "releasePage": "发布页",
+    "releaseNotes": "发布说明",
+    "emptyReleaseNotes": "暂无发布说明，可前往发布页查看完整变更记录。",
+    "channelStable": "Stable",
+    "releaseSource": "GitHub Releases",
+    "status": {
+      "available": "有可用更新",
+      "checking": "检查中…",
+      "warning": "警告",
+      "notChecked": "未检查"
+    },
+    "buildTypes": {
+      "release": "正式构建",
+      "dev": "开发构建",
+      "custom": "自定义构建"
+    },
+    "deploymentModes": {
+      "docker": "Docker",
+      "binary": "二进制"
+    },
+    "actions": {
+      "check": "检查更新"
+    },
+    "feedback": {
+      "available": "发现可用更新 {{version}}",
+      "upToDate": "当前已是最新版本",
+      "checkFailed": "检查更新失败，请稍后重试"
+    }
+  },
   "common": {
     "online": "在线",
     "newVersionAvailable": "新版本 {{version}} 可用",

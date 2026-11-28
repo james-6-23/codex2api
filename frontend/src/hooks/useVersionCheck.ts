@@ -64,20 +64,29 @@ function writeCachedRemoteRelease(remote: RemoteReleaseInfo) {
   }
 }
 
-async function fetchUpdateInfo(forceNetwork = false): Promise<{ remote: RemoteReleaseInfo; info: SystemUpdateInfo | null } | null> {
-  if (!forceNetwork) {
+async function fetchUpdateInfo(
+  forceNetwork = false,
+  forceUpstream = false,
+): Promise<{ remote: RemoteReleaseInfo; info: SystemUpdateInfo | null } | null> {
+  if (!forceNetwork && !forceUpstream) {
     const cached = readCachedRemoteRelease()
     if (cached) return { remote: cached, info: null }
   }
 
   try {
-    const info = await api.getSystemUpdate()
+    const info = await api.getSystemUpdate(forceUpstream ? { force: true } : undefined)
     const remote = remoteReleaseFromInfo(info)
     return { remote, info }
   } catch {
+    if (forceUpstream) return null
     const cached = readCachedRemoteRelease(true)
     return cached ? { remote: cached, info: null } : null
   }
+}
+
+export interface VersionRefreshOptions {
+  includeDev?: boolean
+  forceUpstream?: boolean
 }
 
 export function useVersionCheck(triggerKey?: string) {
@@ -93,8 +102,10 @@ export function useVersionCheck(triggerKey?: string) {
   const hasUpdate = healthResolved && hasRemoteUpdate(versions.currentVersion, latestVersion)
   const isCustomBuild = !isComparableVersion(versions.currentVersion)
 
-  const check = useCallback(async (forceNetwork = false) => {
-    if (__APP_VERSION__ === 'dev' || !activeRef.current) return
+  const check = useCallback(async (forceNetwork = false, options?: VersionRefreshOptions): Promise<SystemUpdateInfo | null> => {
+    const includeDev = Boolean(options?.includeDev)
+    const forceUpstream = Boolean(options?.forceUpstream)
+    if ((!includeDev && __APP_VERSION__ === 'dev') || !activeRef.current) return null
 
     const healthRequest = ++healthRequestRef.current
     const updateRequest = ++updateRequestRef.current
@@ -113,13 +124,15 @@ export function useVersionCheck(triggerKey?: string) {
       }
     })()
 
-    const updatePending = (async () => {
-      const result = await fetchUpdateInfo(forceNetwork)
-      if (!activeRef.current || updateRequest !== updateRequestRef.current) return
+    const updatePending = (async (): Promise<SystemUpdateInfo | null> => {
+      const result = await fetchUpdateInfo(forceNetwork, forceUpstream)
+      if (!activeRef.current || updateRequest !== updateRequestRef.current) return null
       if (!result) {
-        setUpdateInfo(null)
-        setLatestVersion(null)
-        return
+        if (!forceUpstream) {
+          setUpdateInfo(null)
+          setLatestVersion(null)
+        }
+        return null
       }
 
       if (result.info) writeCachedRemoteRelease(result.remote)
@@ -132,9 +145,11 @@ export function useVersionCheck(triggerKey?: string) {
         return null
       })
       setLatestVersion(versionLabel(remoteLatestVersion))
+      return result.info
     })()
 
-    await Promise.all([healthPending, updatePending])
+    const [, info] = await Promise.all([healthPending, updatePending])
+    return info
   }, [])
 
   useEffect(() => {

@@ -1,7 +1,7 @@
 import { type CSSProperties, type PropsWithChildren, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { NavLink, useLocation } from 'react-router-dom'
-import { LayoutDashboard, Users, Activity, Settings, Server, Languages, Globe, BookOpen, KeyRound, Image as ImageIcon, ShieldAlert, ExternalLink, ChevronLeft, Palette, Sun, Moon, LogOut, Download, Loader2, RefreshCw, Menu, X, CircleDollarSign, Braces, FlaskConical, RadioTower, Search } from 'lucide-react'
+import { LayoutDashboard, Users, Activity, Settings, Server, Languages, Globe, BookOpen, KeyRound, Image as ImageIcon, ShieldAlert, ChevronLeft, Palette, Sun, Moon, LogOut, Menu, X, CircleDollarSign, Braces, FlaskConical, RadioTower, Search } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { api, resetAdminAuthState } from '../api'
 import { isBrandingVideo, useBranding } from '../branding'
@@ -13,6 +13,7 @@ import { getErrorMessage } from '../utils/error'
 import SecurityBanner from './SecurityBanner'
 import GrokImportProgressHost from './GrokImportProgressHost'
 import CommandPalette from './CommandPalette'
+import SystemUpdateModal from './SystemUpdateModal'
 import { GlideMenu } from '@/components/ui/beautiful'
 import { cn } from '@/lib/utils'
 import { CinematicThemeSwitcher } from '@/components/ui/cinematic-theme-switcher'
@@ -74,9 +75,11 @@ export default function Layout({ children }: PropsWithChildren) {
   const { showToast } = useToast()
   const [spinning, setSpinning] = useState(false)
   const logoSrc = siteLogo || defaultLogo
-  const [showVersionPopover, setShowVersionPopover] = useState(false)
+  const [showUpdateModal, setShowUpdateModal] = useState(false)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updatingVersion, setUpdatingVersion] = useState(false)
   const [restartingAfterUpdate, setRestartingAfterUpdate] = useState(false)
+  const [updateError, setUpdateError] = useState<string | null>(null)
   const restartPollRef = useRef<number | null>(null)
   const restartPollActiveRef = useRef(false)
   // 侧栏折叠状态。lg+ 屏才生效;collapsed=true 时只显示 icon,列宽从 264 → 64。
@@ -113,14 +116,10 @@ export default function Layout({ children }: PropsWithChildren) {
       return next
     })
   }
-  const versionPopoverRef = useRef<HTMLDivElement | null>(null)
-  const versionButtonRef = useRef<HTMLButtonElement | null>(null)
-  const [versionPopoverPos, setVersionPopoverPos] = useState<{ top: number; left: number } | null>(null)
   const releaseURL = updateInfo?.release_url || (latestVersion
     ? `https://github.com/james-6-23/codex2api/releases/tag/${encodeURIComponent(latestVersion)}`
     : undefined)
   const canApplyUpdate = hasUpdate && updateInfo?.has_update === true && updateInfo.supported !== false
-  const updateUnavailableReason = updateInfo?.unsupported_reason
 
   const stopRestartPolling = useCallback(() => {
     restartPollActiveRef.current = false
@@ -166,9 +165,36 @@ export default function Layout({ children }: PropsWithChildren) {
     scheduleNext(2500)
   }, [stopRestartPolling, showToast, t])
 
+  const handleCheckUpdates = useCallback(async () => {
+    if (checkingUpdate || updatingVersion || restartingAfterUpdate) return
+    setCheckingUpdate(true)
+    setUpdateError(null)
+    try {
+      const info = await refreshVersion(true, { includeDev: true, forceUpstream: true })
+      if (!info) {
+        showToast(t('systemUpdate.feedback.checkFailed'), 'error')
+        return
+      }
+      if (info.warning) return
+      if (!isCustomBuild && info.has_update && info.latest_version) {
+        const version = info.latest_version.startsWith('v') || info.latest_version.startsWith('V')
+          ? info.latest_version
+          : `v${info.latest_version}`
+        showToast(t('systemUpdate.feedback.available', { version }), 'success')
+      } else {
+        showToast(t('systemUpdate.feedback.upToDate'), 'success')
+      }
+    } catch (error) {
+      showToast(getErrorMessage(error, t('systemUpdate.feedback.checkFailed')), 'error')
+    } finally {
+      setCheckingUpdate(false)
+    }
+  }, [checkingUpdate, isCustomBuild, refreshVersion, restartingAfterUpdate, showToast, t, updatingVersion])
+
   const handleApplyUpdate = async () => {
     if (!canApplyUpdate || updatingVersion || restartingAfterUpdate) return
     setUpdatingVersion(true)
+    setUpdateError(null)
     try {
       const result = await api.performSystemUpdate()
       showToast(result.message || t('common.updateApplied'), 'success')
@@ -176,52 +202,29 @@ export default function Layout({ children }: PropsWithChildren) {
       if (result.restarting) {
         pollForUpdatedVersion(result.latest_version)
       } else {
-        void refreshVersion(true)
+        void refreshVersion(true, { includeDev: true })
       }
     } catch (error) {
-      showToast(getErrorMessage(error, t('common.updateFailed')), 'error')
+      const message = getErrorMessage(error, t('common.updateFailed'))
+      setUpdateError(message)
+      showToast(message, 'error')
     } finally {
       setUpdatingVersion(false)
     }
   }
 
   useEffect(() => {
-    if (showVersionPopover && hasUpdate && !updateInfo) {
-      void refreshVersion(true)
-    }
-  }, [showVersionPopover, hasUpdate, updateInfo, refreshVersion])
-
-  useEffect(() => {
-    if (!showVersionPopover) return
-
-    const updatePosition = () => {
-      const rect = versionButtonRef.current?.getBoundingClientRect()
-      if (!rect) return
-      setVersionPopoverPos({ top: rect.bottom + 8, left: Math.max(8, Math.min(rect.left, window.innerWidth - 248)) })
-    }
-    updatePosition()
-
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target instanceof Node ? event.target : null
-      if (target && versionPopoverRef.current?.contains(target)) return
-      if (target && versionButtonRef.current?.contains(target)) return
-      setShowVersionPopover(false)
-    }
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setShowVersionPopover(false)
-    }
-
-    document.addEventListener('pointerdown', handlePointerDown)
-    document.addEventListener('keydown', handleKeyDown)
-    window.addEventListener('resize', updatePosition)
-    window.addEventListener('scroll', updatePosition, true)
+    if (!showUpdateModal || updateInfo) return
+    let cancelled = false
+    setCheckingUpdate(true)
+    void refreshVersion(true, { includeDev: true })
+      .finally(() => {
+        if (!cancelled) setCheckingUpdate(false)
+      })
     return () => {
-      document.removeEventListener('pointerdown', handlePointerDown)
-      document.removeEventListener('keydown', handleKeyDown)
-      window.removeEventListener('resize', updatePosition)
-      window.removeEventListener('scroll', updatePosition, true)
+      cancelled = true
     }
-  }, [showVersionPopover])
+  }, [showUpdateModal, updateInfo, refreshVersion])
 
   useEffect(() => stopRestartPolling, [stopRestartPolling])
 
@@ -363,6 +366,30 @@ export default function Layout({ children }: PropsWithChildren) {
         onClose={() => setCommandOpen(false)}
         onToggleLang={toggleLang}
       />
+      <SystemUpdateModal
+        open={showUpdateModal}
+        onOpenChange={(nextOpen) => {
+          setShowUpdateModal(nextOpen)
+          if (!nextOpen) setUpdateError(null)
+        }}
+        siteName={siteName}
+        logoSrc={logoSrc}
+        currentVersion={currentVersion}
+        frontendVersion={frontendVersion}
+        versionMismatch={versionMismatch}
+        isCustomBuild={isCustomBuild}
+        hasUpdate={hasUpdate}
+        latestVersion={latestVersion}
+        updateInfo={updateInfo}
+        releaseURL={releaseURL}
+        checking={checkingUpdate}
+        updatingVersion={updatingVersion}
+        restartingAfterUpdate={restartingAfterUpdate}
+        updateError={updateError}
+        canApplyUpdate={canApplyUpdate}
+        onCheckUpdates={() => { void handleCheckUpdates() }}
+        onApplyUpdate={() => { void handleApplyUpdate() }}
+      />
       {backgroundImage ? (
         <div aria-hidden="true" className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
           {isBackgroundVideo ? (
@@ -413,107 +440,19 @@ export default function Layout({ children }: PropsWithChildren) {
                     <div className="relative w-fit">
                       <button
                         type="button"
-                        aria-expanded={showVersionPopover}
-                        aria-controls={showVersionPopover ? 'version-details' : undefined}
+                        aria-haspopup="dialog"
+                        aria-expanded={showUpdateModal}
+                        aria-controls={showUpdateModal ? 'version-details' : undefined}
                         className="relative inline-flex cursor-pointer items-center rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-bold text-primary ring-1 ring-primary/10 transition-colors hover:bg-primary/15"
                         title={versionMismatch ? t('common.versionMismatch') : hasUpdate && latestVersion ? t('common.newVersionAvailable', { version: latestVersion }) : undefined}
                         tabIndex={sidebarCollapsed ? -1 : 0}
-                        onClick={(event) => {
-                          versionButtonRef.current = event.currentTarget
-                          setShowVersionPopover((current) => !current)
-                        }}
+                        onClick={() => setShowUpdateModal(true)}
                       >
                         {buildVersionLabel(currentVersion)}
                         {(hasUpdate || versionMismatch) && (
                           <span aria-hidden="true" className={cn('absolute -top-1.5 left-1/2 size-2.5 -translate-x-1/2 rounded-full shadow-sm ring-2 ring-[hsl(var(--sidebar-background))]', hasUpdate ? 'bg-red-500 animate-pulse' : 'bg-amber-500')} />
                         )}
                       </button>
-                      {showVersionPopover && versionPopoverPos && createPortal(
-                        <div
-                          id="version-details"
-                          ref={versionPopoverRef}
-                          style={{ position: 'fixed', top: versionPopoverPos.top, left: versionPopoverPos.left }}
-                          className="z-[100] w-[240px] rounded-lg border border-border bg-popover p-3 text-left shadow-xl"
-                        >
-                          <div className="text-[13px] font-semibold text-foreground">
-                            {isCustomBuild
-                              ? t('common.versionCustomBuild')
-                              : latestVersion
-                                ? hasUpdate
-                                  ? t('common.newVersionAvailable', { version: latestVersion })
-                                  : t('common.versionLatest')
-                                : t('common.versionChecking')}
-                          </div>
-                          <div className="mt-1 break-words text-[11px] text-muted-foreground">
-                            {t('common.currentVersion', { version: currentVersion })}
-                          </div>
-                          {isCustomBuild && (
-                            <div role="status" className="mt-3 rounded-md border border-border bg-muted/50 px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
-                              {t('common.versionCustomBuildHint')}
-                            </div>
-                          )}
-                          {versionMismatch && (
-                            <>
-                              <div className="mt-1 break-words text-[11px] text-muted-foreground">
-                                {t('common.frontendBuildVersion', { version: frontendVersion })}
-                              </div>
-                              <div role="status" className="mt-3 rounded-md border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-[11px] font-medium leading-relaxed text-amber-700 dark:text-amber-300">
-                                {t('common.versionMismatch')}
-                              </div>
-                            </>
-                          )}
-                          {latestVersion && (
-                            <div className="mt-1 text-[11px] text-muted-foreground">
-                              {t('common.latestVersion', { version: latestVersion })}
-                            </div>
-                          )}
-                          {hasUpdate && updateUnavailableReason && (
-                            <div className="mt-3 rounded-md border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-[11px] font-medium leading-relaxed text-amber-700 dark:text-amber-300">
-                              {updateUnavailableReason}
-                            </div>
-                          )}
-                          {hasUpdate && updateInfo?.warning && (
-                            <div className="mt-3 rounded-md border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-[11px] font-medium leading-relaxed text-amber-700 dark:text-amber-300">
-                              {updateInfo.warning}
-                            </div>
-                          )}
-                          {hasUpdate && (
-                            <button
-                              type="button"
-                              className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-primary px-2.5 py-1.5 text-[12px] font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
-                              disabled={!canApplyUpdate || updatingVersion || restartingAfterUpdate}
-                              title={!canApplyUpdate ? updateUnavailableReason : undefined}
-                              onClick={handleApplyUpdate}
-                            >
-                              {restartingAfterUpdate ? (
-                                <RefreshCw className="size-3.5 animate-spin" />
-                              ) : updatingVersion ? (
-                                <Loader2 className="size-3.5 animate-spin" />
-                              ) : (
-                                <Download className="size-3.5" />
-                              )}
-                              {restartingAfterUpdate
-                                ? t('common.restarting')
-                                : updatingVersion
-                                  ? t('common.updating')
-                                  : t('common.updateNow')}
-                            </button>
-                          )}
-                          {releaseURL && (
-                            <a
-                              href={releaseURL}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-primary/20 bg-primary/10 px-2.5 py-1.5 text-[12px] font-semibold text-primary transition-colors hover:bg-primary/15"
-                              onClick={() => setShowVersionPopover(false)}
-                            >
-                              {t('common.viewReleaseNotes')}
-                              <ExternalLink className="size-3.5" />
-                            </a>
-                          )}
-                        </div>,
-                        document.body,
-                      )}
                     </div>
                   </div>
                 </div>
@@ -713,14 +652,12 @@ export default function Layout({ children }: PropsWithChildren) {
               </strong>
               <button
                 type="button"
-                aria-expanded={showVersionPopover}
-                aria-controls={showVersionPopover ? 'version-details' : undefined}
+                aria-haspopup="dialog"
+                aria-expanded={showUpdateModal}
+                aria-controls={showUpdateModal ? 'version-details' : undefined}
                 className="relative inline-flex shrink-0 items-center rounded-md bg-primary/10 px-2 py-0.5 text-[11px] font-bold text-primary ring-1 ring-primary/10 transition-colors hover:bg-primary/15"
                 title={versionMismatch ? t('common.versionMismatch') : hasUpdate && latestVersion ? t('common.newVersionAvailable', { version: latestVersion }) : undefined}
-                onClick={(event) => {
-                  versionButtonRef.current = event.currentTarget
-                  setShowVersionPopover((current) => !current)
-                }}
+                onClick={() => setShowUpdateModal(true)}
               >
                 {buildVersionLabel(currentVersion)}
                 {(hasUpdate || versionMismatch) && (

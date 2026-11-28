@@ -72,6 +72,10 @@ type systemUpdateInfo struct {
 	RuntimeOS         string `json:"runtime_os"`
 	RuntimeArch       string `json:"runtime_arch"`
 	Mode              string `json:"mode"`
+	BuildType         string `json:"build_type,omitempty"`
+	DeploymentMode    string `json:"deployment_mode,omitempty"`
+	ReleaseName       string `json:"release_name,omitempty"`
+	ReleaseNotes      string `json:"release_notes,omitempty"`
 	ReleaseURL        string `json:"release_url,omitempty"`
 	AssetName         string `json:"asset_name,omitempty"`
 	PublishedAt       string `json:"published_at,omitempty"`
@@ -176,13 +180,40 @@ func newDefaultSystemReleaseClient() *defaultSystemReleaseClient {
 
 func (h *Handler) GetSystemUpdate(c *gin.Context) {
 	updater := h.systemUpdater()
-	info, err := updater.Check(c.Request.Context())
+	force := isSystemUpdateForceParam(c.Query("force"))
+	info, err := updater.CheckWithOptions(c.Request.Context(), force)
 	if err != nil {
 		log.Printf("检查系统更新失败，已静默降级: %v", err)
 		c.JSON(http.StatusOK, updater.unavailableInfo())
 		return
 	}
 	c.JSON(http.StatusOK, info)
+}
+
+func isSystemUpdateForceParam(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveSystemBuildType(current string) string {
+	if current == "" || current == "dev" {
+		return "dev"
+	}
+	if _, ok := parseSystemVersion(current); ok {
+		return "release"
+	}
+	return "custom"
+}
+
+func (u *systemUpdater) resolveDeploymentMode() string {
+	if u.runningInContainer != nil && u.runningInContainer() {
+		return "docker"
+	}
+	return "binary"
 }
 
 func (u *systemUpdater) unavailableInfo() *systemUpdateInfo {
@@ -193,6 +224,8 @@ func (u *systemUpdater) unavailableInfo() *systemUpdateInfo {
 		RuntimeOS:      u.goos,
 		RuntimeArch:    u.goarch,
 		Mode:           "binary",
+		BuildType:      resolveSystemBuildType(current),
+		DeploymentMode: u.resolveDeploymentMode(),
 		Supported:      true,
 		Warning:        "更新源暂时不可用，已跳过本次自动检查",
 	}
@@ -238,7 +271,11 @@ func (h *Handler) systemUpdater() *systemUpdater {
 }
 
 func (u *systemUpdater) Check(ctx context.Context) (*systemUpdateInfo, error) {
-	inspection, err := u.inspect(ctx)
+	return u.CheckWithOptions(ctx, false)
+}
+
+func (u *systemUpdater) CheckWithOptions(ctx context.Context, forceRefresh bool) (*systemUpdateInfo, error) {
+	inspection, err := u.inspect(ctx, forceRefresh)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +288,7 @@ func (u *systemUpdater) PerformUpdate(ctx context.Context) (*systemUpdateResult,
 	}
 	defer u.mu.Unlock()
 
-	inspection, err := u.inspect(ctx)
+	inspection, err := u.inspect(ctx, false)
 	if err != nil {
 		return nil, err
 	}
@@ -285,14 +322,17 @@ func (u *systemUpdater) PerformUpdate(ctx context.Context) (*systemUpdateResult,
 	}, nil
 }
 
-func (u *systemUpdater) inspect(ctx context.Context) (*systemUpdateInspection, error) {
+func (u *systemUpdater) inspect(ctx context.Context, forceRefresh bool) (*systemUpdateInspection, error) {
 	current := normalizeSystemVersion(u.currentVersion)
+	deploymentMode := u.resolveDeploymentMode()
 	info := &systemUpdateInfo{
 		CurrentVersion: current,
 		LatestVersion:  current,
 		RuntimeOS:      u.goos,
 		RuntimeArch:    u.goarch,
 		Mode:           "binary",
+		BuildType:      resolveSystemBuildType(current),
+		DeploymentMode: deploymentMode,
 		Supported:      true,
 	}
 
@@ -307,11 +347,11 @@ func (u *systemUpdater) inspect(ctx context.Context) (*systemUpdateInspection, e
 		info.Supported = false
 		info.UnsupportedReason = "Windows 运行时暂不支持在线替换正在运行的可执行文件"
 	}
-	if u.runningInContainer != nil && u.runningInContainer() {
+	if deploymentMode == "docker" {
 		info.Warning = "检测到容器环境:在线更新只替换当前容器内的二进制,容器重建后会恢复为镜像自带版本,建议改用拉取新镜像的方式升级"
 	}
 
-	release, err := u.fetchLatestRelease(ctx)
+	release, err := u.fetchLatestRelease(ctx, forceRefresh)
 	if err != nil {
 		return nil, err
 	}
@@ -320,6 +360,8 @@ func (u *systemUpdater) inspect(ctx context.Context) (*systemUpdateInspection, e
 		return nil, fmt.Errorf("最新 release 缺少有效版本号")
 	}
 	info.LatestVersion = latest
+	info.ReleaseName = strings.TrimSpace(release.Name)
+	info.ReleaseNotes = strings.TrimSpace(release.Body)
 	info.ReleaseURL = release.HTMLURL
 	info.PublishedAt = release.PublishedAt
 	info.HasUpdate = compareSystemVersions(current, latest) < 0
@@ -340,12 +382,12 @@ func (u *systemUpdater) inspect(ctx context.Context) (*systemUpdateInspection, e
 	}, nil
 }
 
-func (u *systemUpdater) fetchLatestRelease(ctx context.Context) (*systemGitHubRelease, error) {
+func (u *systemUpdater) fetchLatestRelease(ctx context.Context, forceRefresh bool) (*systemGitHubRelease, error) {
 	now := time.Now()
 	u.releaseCacheMu.Lock()
 	defer u.releaseCacheMu.Unlock()
 
-	if u.releaseCache != nil && now.Before(u.releaseCacheExpiresAt) {
+	if !forceRefresh && u.releaseCache != nil && now.Before(u.releaseCacheExpiresAt) {
 		return cloneSystemGitHubRelease(u.releaseCache), nil
 	}
 

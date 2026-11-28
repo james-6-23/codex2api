@@ -110,6 +110,8 @@ func TestValidateSystemUpdateURL(t *testing.T) {
 func TestSystemUpdaterCheckFindsMatchingAsset(t *testing.T) {
 	client := &fakeSystemReleaseClient{release: &systemGitHubRelease{
 		TagName: "v2.4.4",
+		Name:    "v2.4.4 Release",
+		Body:    "## Features\n- Added update modal",
 		HTMLURL: "https://github.com/james-6-23/codex2api/releases/tag/v2.4.4",
 		Assets: []systemGitHubAsset{
 			{Name: "codex2api_2.4.4_linux_arm64.tar.gz", BrowserDownloadURL: "https://github.com/arm64"},
@@ -137,6 +139,18 @@ func TestSystemUpdaterCheckFindsMatchingAsset(t *testing.T) {
 	if info.AssetName != "codex2api_2.4.4_linux_amd64.tar.gz" {
 		t.Fatalf("AssetName = %q", info.AssetName)
 	}
+	if info.BuildType != "release" {
+		t.Fatalf("BuildType = %q, want release", info.BuildType)
+	}
+	if info.DeploymentMode != "binary" {
+		t.Fatalf("DeploymentMode = %q, want binary", info.DeploymentMode)
+	}
+	if info.ReleaseName != "v2.4.4 Release" {
+		t.Fatalf("ReleaseName = %q, want v2.4.4 Release", info.ReleaseName)
+	}
+	if info.ReleaseNotes != "## Features\n- Added update modal" {
+		t.Fatalf("ReleaseNotes = %q", info.ReleaseNotes)
+	}
 }
 
 func TestSystemUpdaterContainerWarning(t *testing.T) {
@@ -162,6 +176,9 @@ func TestSystemUpdaterContainerWarning(t *testing.T) {
 	if info.Warning == "" {
 		t.Fatal("Warning is empty, want container warning")
 	}
+	if info.DeploymentMode != "docker" {
+		t.Fatalf("DeploymentMode = %q, want docker", info.DeploymentMode)
+	}
 
 	updater.runningInContainer = func() bool { return false }
 	info, err = updater.Check(context.Background())
@@ -170,6 +187,9 @@ func TestSystemUpdaterContainerWarning(t *testing.T) {
 	}
 	if info.Warning != "" {
 		t.Fatalf("Warning = %q, want empty outside container", info.Warning)
+	}
+	if info.DeploymentMode != "binary" {
+		t.Fatalf("DeploymentMode = %q, want binary", info.DeploymentMode)
 	}
 }
 
@@ -245,6 +265,40 @@ func TestSystemUpdaterCachesLatestRelease(t *testing.T) {
 	}
 	if client.fetches != 1 {
 		t.Fatalf("FetchLatestRelease calls = %d, want 1", client.fetches)
+	}
+	if _, err := updater.CheckWithOptions(context.Background(), true); err != nil {
+		t.Fatalf("force CheckWithOptions() error: %v", err)
+	}
+	if client.fetches != 2 {
+		t.Fatalf("FetchLatestRelease calls after force = %d, want 2", client.fetches)
+	}
+}
+
+func TestGetSystemUpdateForceBypassesCache(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	client := &fakeSystemReleaseClient{release: &systemGitHubRelease{
+		TagName: "v2.4.4",
+		Body:    "Release body",
+		Assets:  []systemGitHubAsset{{Name: "codex2api_2.4.4_linux_amd64.tar.gz"}},
+	}}
+	handler := &Handler{systemUpdate: &systemUpdater{
+		currentVersion: "v2.4.3",
+		client:         client,
+		goos:           "linux",
+		goarch:         "amd64",
+	}}
+
+	for _, target := range []string{"/api/admin/system/update", "/api/admin/system/update", "/api/admin/system/update?force=1"} {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodGet, target, nil)
+		handler.GetSystemUpdate(c)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200", target, recorder.Code)
+		}
+	}
+	if client.fetches != 2 {
+		t.Fatalf("FetchLatestRelease calls = %d, want 2", client.fetches)
 	}
 }
 

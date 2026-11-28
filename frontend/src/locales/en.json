@@ -738,6 +738,46 @@
     "capabilityUnrouted": "No routable backend yet",
     "capabilityUntested": "untested"
   },
+  "systemUpdate": {
+    "title": "System Update",
+    "description": "Check versions, review release notes, and apply online updates",
+    "application": "Application Package Update",
+    "currentVersionLabel": "Current Version",
+    "latestVersionLabel": "Latest Version",
+    "buildLabel": "Build",
+    "deploymentLabel": "Deployment",
+    "platformLabel": "Platform",
+    "publishedAtLabel": "Published",
+    "channelLabel": "Channel",
+    "releasePage": "Release",
+    "releaseNotes": "Release Notes",
+    "emptyReleaseNotes": "No release notes available. Visit the release page for full details.",
+    "channelStable": "Stable",
+    "releaseSource": "GitHub Releases",
+    "status": {
+      "available": "Update Available",
+      "checking": "Checking…",
+      "warning": "Warning",
+      "notChecked": "Not Checked"
+    },
+    "buildTypes": {
+      "release": "Release Build",
+      "dev": "Dev Build",
+      "custom": "Custom Build"
+    },
+    "deploymentModes": {
+      "docker": "Docker",
+      "binary": "Binary"
+    },
+    "actions": {
+      "check": "Check for Updates"
+    },
+    "feedback": {
+      "available": "Update {{version}} is available",
+      "upToDate": "You are already on the latest version",
+      "checkFailed": "Failed to check for updates. Please try again."
+    }
+  },
   "common": {
     "online": "Online",
     "newVersionAvailable": "New version {{version}} available",

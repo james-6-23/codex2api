@@ -330,6 +330,46 @@
       }
     }
   },
+  "systemUpdate": {
+    "title": "系統更新",
+    "description": "檢查版本、查看發佈說明並執行線上更新",
+    "application": "應用套件更新",
+    "currentVersionLabel": "目前版本",
+    "latestVersionLabel": "最新版本",
+    "buildLabel": "建置",
+    "deploymentLabel": "部署",
+    "platformLabel": "平台",
+    "publishedAtLabel": "發佈日期",
+    "channelLabel": "通道",
+    "releasePage": "發佈頁",
+    "releaseNotes": "發佈說明",
+    "emptyReleaseNotes": "暫無發佈說明，可前往發佈頁查看完整變更紀錄。",
+    "channelStable": "Stable",
+    "releaseSource": "GitHub Releases",
+    "status": {
+      "available": "有可用更新",
+      "checking": "檢查中…",
+      "warning": "警告",
+      "notChecked": "未檢查"
+    },
+    "buildTypes": {
+      "release": "正式建置",
+      "dev": "開發建置",
+      "custom": "自訂建置"
+    },
+    "deploymentModes": {
+      "docker": "Docker",
+      "binary": "二進位"
+    },
+    "actions": {
+      "check": "檢查更新"
+    },
+    "feedback": {
+      "available": "發現可用更新 {{version}}",
+      "upToDate": "目前已是最新版本",
+      "checkFailed": "檢查更新失敗，請稍後重試"
+    }
+  },
   "common": {
     "frontendBuildVersion": "前端建置：{{version}}",
     "versionMismatch": "前端資源與服務版本不一致，建議重新建置前端後再編譯程式。",
