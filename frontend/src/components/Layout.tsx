@@ -421,7 +421,7 @@ export default function Layout({ children }: PropsWithChildren) {
           <div className={`flex flex-col h-full ${sidebarCollapsed ? 'px-2' : 'px-4'} pt-5 pb-4 transition-[padding] ${containerEase}`}>
             {/* Brand */}
             <div className={`pb-4 border-b border-border ${sidebarCollapsed ? 'flex justify-center' : ''}`}>
-              <div className={`flex items-center gap-3 ${sidebarCollapsed ? 'justify-center' : ''}`}>
+              <div className={`flex items-center transition-[gap] ${containerEase} ${sidebarCollapsed ? 'justify-center gap-0' : 'gap-3'}`}>
                 <img src={logoSrc} alt={siteName} className="size-10 rounded-lg object-cover shadow-sm shrink-0" />
                 <div
                   aria-hidden={sidebarCollapsed}
@@ -472,7 +472,7 @@ export default function Layout({ children }: PropsWithChildren) {
                   sidebarCollapsed ? 'size-9 justify-center px-0' : 'min-w-0 flex-1 justify-between gap-2 px-2.5',
                 )}
               >
-                <span className="flex min-w-0 items-center gap-2">
+                <span className={cn('flex min-w-0 items-center transition-[gap]', containerEase, sidebarCollapsed ? 'gap-0' : 'gap-2')}>
                   <Search className="size-3.5 shrink-0" />
                   <span
                     className={`truncate whitespace-nowrap transition-[max-width,opacity] ${textEase} ${textRevealDelay} ${
@@ -630,11 +630,11 @@ export default function Layout({ children }: PropsWithChildren) {
         {/* Main content */}
         {/* overflow-x-clip (not hidden): clips horizontal overflow without creating a
             scroll container that would break position:sticky for in-page sidebars (docs TOC). */}
-        <main className="min-w-0 overflow-x-clip p-5 max-lg:p-3 max-lg:pb-safe-nav max-lg:safe-px">
+        <main className="min-w-0 overflow-x-clip p-5 max-lg:p-3 max-lg:pt-[calc(0.75rem+env(safe-area-inset-top,0px))] max-lg:pb-safe-nav max-lg:safe-px">
           {/* Mobile topbar */}
           <header
             data-slot="admin-mobile-topbar"
-            className="mb-4 hidden max-lg:flex min-w-0 w-full max-w-full items-center justify-between gap-2 overflow-hidden rounded-xl border border-border bg-card/95 p-2.5 shadow-sm safe-pt"
+            className="mb-4 hidden max-lg:flex min-w-0 w-full max-w-full items-center justify-between gap-2 overflow-hidden rounded-xl border border-border bg-card/95 p-2.5 shadow-sm"
           >
             <div className="flex min-w-0 flex-1 items-center gap-2">
               <button

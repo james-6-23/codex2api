@@ -24,12 +24,14 @@ interface SelectProps {
   compact?: boolean
   triggerClassName?: string
   dropdownMinWidth?: number
+  dropdownFitContent?: boolean
 }
 
 interface DropdownPosition {
   top: number
   left: number
   width: number
+  maxWidth: number
   maxHeight: number
   openUp: boolean
 }
@@ -78,9 +80,11 @@ export function Select({
   compact = false,
   triggerClassName,
   dropdownMinWidth = 0,
+  dropdownFitContent = false,
 }: SelectProps) {
   const [open, setOpen] = useState(false)
   const [position, setPosition] = useState<DropdownPosition | null>(null)
+  const [isScrollable, setIsScrollable] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
@@ -99,13 +103,15 @@ export function Select({
     const openUp = spaceBelow < Math.min(DROPDOWN_MAX_HEIGHT, 160) && spaceAbove > spaceBelow
     const maxHeight = Math.max(140, Math.min(DROPDOWN_MAX_HEIGHT, openUp ? spaceAbove : spaceBelow))
     // Keep dropdown fully inside the viewport on small screens.
-    const width = Math.min(Math.max(rect.width, dropdownMinWidth), viewportWidth - VIEWPORT_PADDING * 2)
+    const maxWidth = viewportWidth - VIEWPORT_PADDING * 2
+    const width = Math.min(Math.max(rect.width, dropdownMinWidth), maxWidth)
     const maxLeft = viewportWidth - width - VIEWPORT_PADDING
     const left = Math.min(Math.max(VIEWPORT_PADDING, rect.left), Math.max(VIEWPORT_PADDING, maxLeft))
     setPosition({
       top: openUp ? rect.top - DROPDOWN_GAP : rect.bottom + DROPDOWN_GAP,
       left,
       width,
+      maxWidth,
       maxHeight,
       openUp,
     })
@@ -115,6 +121,29 @@ export function Select({
     if (!open) return
     computePosition()
   }, [open, computePosition, options.length])
+
+  // 仅当选项列表真正可滚动时预留滚动条槽位，避免短菜单右侧出现额外空白导致左右留白不对称；
+  // 若启用了 dropdownFitContent，也在测量实际内容宽度后把右边缘夹回视口内。
+  useLayoutEffect(() => {
+    if (!open || !position) {
+      setIsScrollable(false)
+      return
+    }
+    const list = listRef.current
+    if (list) {
+      setIsScrollable(list.scrollHeight > list.clientHeight + 1)
+    }
+    if (dropdownFitContent) {
+      const dropdown = dropdownRef.current
+      if (dropdown) {
+        const actualWidth = dropdown.getBoundingClientRect().width
+        const maxLeft = Math.max(VIEWPORT_PADDING, window.innerWidth - actualWidth - VIEWPORT_PADDING)
+        if (position.left > maxLeft) {
+          setPosition((prev) => (prev && prev.left > maxLeft ? { ...prev, left: maxLeft } : prev))
+        }
+      }
+    }
+  }, [open, position, dropdownFitContent, options.length])
 
   // 打开后把当前选中项滚进可视区。
   useLayoutEffect(() => {
@@ -265,7 +294,9 @@ export function Select({
                 top: position.openUp ? undefined : position.top,
                 bottom: position.openUp ? window.innerHeight - position.top : undefined,
                 left: position.left,
-                width: position.width,
+                width: dropdownFitContent ? 'max-content' : position.width,
+                minWidth: dropdownFitContent ? position.width : undefined,
+                maxWidth: dropdownFitContent ? position.maxWidth : undefined,
                 // 高度约束交给内层可滚动列表单点控制，避免双重 maxHeight + flex 布局
                 // 让内层 clientHeight/scrollHeight 计算出现歧义、导致 wheel 判空滚不动。
               }}
@@ -277,8 +308,9 @@ export function Select({
                 ref={listRef}
                 className={cn(
                   'overscroll-contain overflow-x-hidden overflow-y-auto',
-                  // 始终显示细滚动条，避免 macOS 叠加滚动条「看不见、以为不能滚」。
-                  '[scrollbar-gutter:stable] [scrollbar-width:thin]',
+                  // 仅在存在溢出滚动时预留滚动条槽位，避免无滚动短菜单右侧多出不对称留白。
+                  '[scrollbar-width:thin]',
+                  isScrollable && '[scrollbar-gutter:stable]',
                   '[&::-webkit-scrollbar]:w-1.5',
                   '[&::-webkit-scrollbar-track]:bg-transparent',
                   '[&::-webkit-scrollbar-thumb]:rounded-full',
@@ -300,7 +332,8 @@ export function Select({
                         aria-label={option.label}
                         aria-selected={isSelected}
                         className={cn(
-                          'flex w-full items-center justify-between gap-2 text-left transition-colors',
+                          'flex w-full items-center justify-between text-left transition-colors',
+                          dropdownFitContent ? 'gap-3' : 'gap-2',
                           compact ? 'rounded-md px-2 py-1.5 text-[13px]' : 'rounded-md px-2.5 py-2 text-sm',
                           isSelected
                             ? 'bg-primary/10 text-primary'
