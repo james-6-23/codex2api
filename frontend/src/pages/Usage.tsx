@@ -1,12 +1,12 @@
 import { ImageBillingCost } from '../components/image-studio/ImageBillingCost'
 import { mediaBillingUnit, type MediaBillingUnit } from '../lib/imageBilling'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import { createPortal } from 'react-dom'
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts'
 import { api } from '../api'
 import { getTimeRangeISO, getBucketConfig, type TimeRangeKey } from '../lib/timeRange'
 import UsageInsightsDeck from '../components/usage/UsageInsightsDeck'
+import UsageDateRangePopover, { formatCustomRangeChipLabel } from '../components/usage/UsageDateRangePopover'
 import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
 import ChannelFilter, { useUsageChannel } from '../components/ChannelFilter'
@@ -41,7 +41,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Activity, Box, Clock, Zap, Sparkles, AlertTriangle, Search, Brain, DatabaseZap, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route, SlidersHorizontal, ShieldAlert, RefreshCw, ChevronDown, RotateCcw, PlugZap, FlaskConical } from 'lucide-react'
+import { Activity, Box, CalendarDays, Clock, Zap, Sparkles, AlertTriangle, Search, Brain, DatabaseZap, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route, SlidersHorizontal, ShieldAlert, RefreshCw, ChevronDown, RotateCcw, PlugZap, FlaskConical } from 'lucide-react'
 
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
@@ -152,14 +152,13 @@ function InternalRequestBadge({ log }: { log: UsageLog }) {
     : t(presentation?.tooltipKey ?? 'usage.internalRequestTooltip')
 
   return (
-    <Badge
-      variant="outline"
-      className="gap-0.5 whitespace-nowrap border-transparent bg-fuchsia-500/12 text-[11px] font-semibold text-fuchsia-700 dark:bg-fuchsia-500/20 dark:text-fuchsia-300"
+    <span
+      className="inline-flex h-[20px] shrink-0 items-center gap-1 whitespace-nowrap rounded-md bg-fuchsia-500/[0.08] px-1.5 font-sans text-[10.5px] font-medium leading-none text-fuchsia-700 ring-1 ring-inset ring-fuchsia-500/20 dark:bg-fuchsia-500/15 dark:text-fuchsia-300"
       title={title}
     >
-      <Icon className="size-3" />
+      <Icon className="size-2.5 shrink-0" />
       {label}
-    </Badge>
+    </span>
   )
 }
 
@@ -196,18 +195,7 @@ interface CustomRange {
   end: string
 }
 const CUSTOM_RANGE_MAX_DAYS = 90
-const CUSTOM_RANGE_MAX_MS = CUSTOM_RANGE_MAX_DAYS * 24 * 60 * 60 * 1000
 
-// datetime-local input 的字面值 ↔ Date 转换。input 本身没有时区,按本地时间解释。
-function dateToLocalInputValue(date: Date): string {
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
-function localInputValueToDate(value: string): Date | null {
-  if (!value) return null
-  const d = new Date(value)
-  return Number.isNaN(d.getTime()) ? null : d
-}
 function dateToLocalRFC3339(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0')
   const offset = date.getTimezoneOffset()
@@ -270,8 +258,8 @@ function getInitialUsageCustomRange(): CustomRange | null {
 }
 
 const USAGE_ANALYSIS_VISIBILITY_KEY = 'usage_analysis_visible'
-const usageStatCardContentClass = 'flex min-w-0 flex-col gap-1.5 p-3'
-const usageStatValueClass = 'min-w-0 break-words text-[20px] font-bold leading-tight tabular-nums sm:text-[22px]'
+const usageStatCardContentClass = 'flex min-w-0 flex-col gap-1.5 p-3.5'
+const usageStatValueClass = 'min-w-0 break-words font-sans text-[21px] font-semibold leading-tight tracking-[-0.03em] tabular-nums sm:text-[23px]'
 
 function getInitialAnalysisVisibility(): boolean {
   try {
@@ -435,12 +423,12 @@ function UsageCostCell({ log }: { log: UsageLog }) {
       <TooltipTrigger asChild>
         <button
           type="button"
-          className="group inline-flex cursor-help items-center gap-1.5 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="group inline-flex cursor-help items-center gap-1 rounded-md px-1.5 py-0.5 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <span className="text-[13px] font-semibold leading-none tabular-nums text-emerald-600 antialiased dark:text-emerald-400">
+          <span className="font-sans text-[12.5px] font-medium leading-none tracking-[-0.01em] tabular-nums text-emerald-600 antialiased dark:text-emerald-400">
             {formatUSD(displayCost)}
           </span>
-          <Info className="size-3.5 shrink-0 text-muted-foreground transition-colors group-hover:text-blue-500" />
+          <Info className="size-3 shrink-0 text-muted-foreground/65 transition-colors group-hover:text-primary" />
         </button>
       </TooltipTrigger>
       <TooltipContent side="right" sideOffset={8} className="w-96 max-w-none whitespace-nowrap rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 text-xs text-slate-50 shadow-xl">
@@ -541,9 +529,9 @@ function MediaUsageCost({ log, unit }: { log: UsageLog; unit: MediaBillingUnit }
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <button type="button" className="group inline-flex cursor-help items-center gap-1.5 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-          <span className="text-[13px] font-semibold leading-none tabular-nums text-emerald-600 antialiased dark:text-emerald-400">{formatUSD(userBilled > 0 ? userBilled : accountBilled)}</span>
-          <Info className="size-3.5 shrink-0 text-muted-foreground transition-colors group-hover:text-blue-500" />
+        <button type="button" className="group inline-flex cursor-help items-center gap-1 rounded-md px-1.5 py-0.5 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <span className="font-sans text-[12.5px] font-medium leading-none tracking-[-0.01em] tabular-nums text-emerald-600 antialiased dark:text-emerald-400">{formatUSD(userBilled > 0 ? userBilled : accountBilled)}</span>
+          <Info className="size-3 shrink-0 text-muted-foreground/65 transition-colors group-hover:text-primary" />
         </button>
       </TooltipTrigger>
       <TooltipContent side="right" sideOffset={8} className="w-72 max-w-none whitespace-nowrap rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 text-xs text-slate-50 shadow-xl">
@@ -923,18 +911,16 @@ function StatusCodeBadge({ log }: { log: UsageLog }) {
       : 'bg-rose-500 animate-pulse'
 
   const badge = (
-    <Badge
-      variant="outline"
+    <span
       className={cn(
-        usageTableBadgeClass,
-        'gap-1.5',
+        'inline-flex h-[24px] items-center gap-1.5 rounded-full border px-2.5 font-sans text-[11.5px] font-medium leading-none tabular-nums shadow-[0_1px_1px_rgba(15,23,42,0.03)] transition-colors',
         getStatusBadgeClassName(log.status_code),
-        log.status_code !== 200 ? 'cursor-help ring-1 ring-inset ring-current/10' : ''
+        log.status_code !== 200 ? 'cursor-help' : '',
       )}
     >
       <span className={cn('size-1.5 rounded-full', dotColor)} />
       <span>{log.status_code}</span>
-    </Badge>
+    </span>
   )
 
   if (log.status_code === 200) {
@@ -1020,7 +1006,7 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
 
   if (!hasAudit && !log.request_id && !log.upstream_request_id) {
     return (
-      <div className="font-mono text-[11px] text-muted-foreground" title={t('usage.userAgentNotRecorded')}>
+      <div className="font-mono text-[11px] text-muted-foreground/45" title={t('usage.userAgentNotRecorded')}>
         UA: -
       </div>
     )
@@ -1240,20 +1226,21 @@ function CyberPolicyField({ label, value, danger = false }: { label: string; val
   )
 }
 
-const usageTableHeadClass = 'text-[13px] font-semibold'
-const usageTableTextClass = 'text-[14px]'
-const usageTableMonoClass = 'font-mono text-[13px] tabular-nums'
-const usageTableBadgeClass = 'text-[13px]'
+const usageTableHeadClass = 'text-[11.5px] font-medium text-muted-foreground'
+const usageTableTextClass = 'text-[12.5px]'
+const usageTableMonoClass = 'font-mono text-[12px] tabular-nums'
+const usageTableNumClass = 'font-sans text-[12.5px] font-medium tabular-nums tracking-[-0.01em]'
+const usageTableBadgeClass = 'text-[12px]'
 
 // UsageTimeCell 时间列双色:日期弱化、时分秒突出,扫表时先看到时间;整串仍在 title。
 function UsageTimeCell({ value }: { value?: string | null }) {
   const full = formatBeijingTime(value)
   const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/.exec(full)
-  if (!m) return <span>{full}</span>
+  if (!m) return <span className="font-sans text-[12px] tabular-nums text-foreground/85">{full}</span>
   return (
-    <span title={full}>
-      <span className="text-[11px] text-muted-foreground/60">{m[1]}</span>
-      <span className="ml-1.5 text-foreground/80">{m[2]}</span>
+    <span title={full} className="font-sans text-[12px] tabular-nums">
+      <span className="text-[11px] font-normal text-muted-foreground/60">{m[1]}</span>
+      <span className="ml-1.5 font-medium text-foreground/85">{m[2]}</span>
     </span>
   )
 }
@@ -1265,26 +1252,24 @@ function UsageEndpointText({ value }: { value: string }) {
   return (
     <>
       <span className="text-muted-foreground/50">{m[1]}</span>
-      <span className="text-foreground/80">{m[2]}</span>
+      <span className="font-medium text-foreground/85">{m[2]}</span>
     </>
   )
 }
 
 function StreamBadge({ stream }: { stream: boolean }) {
   return (
-    <Badge
-      variant="outline"
+    <span
       className={cn(
-        usageTableBadgeClass,
-        'border-transparent',
+        'inline-flex h-[20px] items-center rounded-md px-1.5 font-sans text-[11px] font-medium leading-none ring-1 ring-inset',
         stream
-          ? 'bg-indigo-500/12 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400'
+          ? 'bg-indigo-500/[0.08] text-indigo-600 ring-indigo-500/15 dark:bg-indigo-500/15 dark:text-indigo-300 dark:ring-indigo-400/20'
           // 非流式是少数派,给琥珀色让它在一列 stream 里能被一眼挑出来
-          : 'bg-amber-500/12 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300',
+          : 'bg-amber-500/[0.09] text-amber-700 ring-amber-500/20 dark:bg-amber-500/15 dark:text-amber-300 dark:ring-amber-400/20',
       )}
     >
       {stream ? 'stream' : 'sync'}
-    </Badge>
+    </span>
   )
 }
 const modelPieColors = [
@@ -1924,105 +1909,104 @@ export default function Usage() {
         )}
         <div className={cn('space-y-6 transition-opacity', statsOutdated && 'opacity-60')} aria-busy={statsOutdated && !statsOutdatedFailed}>
         {/* Stat overview: 6 metrics in a single row */}
-        <div className="grid grid-cols-2 gap-2.5 sm:gap-3 md:grid-cols-3 xl:grid-cols-6">
-          <Card className="min-w-0 py-0">
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+          <Card className="min-w-0 rounded-2xl border-border/75 bg-card py-0 shadow-2xs transition-colors hover:border-border">
             <CardContent className={usageStatCardContentClass}>
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-bold uppercase text-muted-foreground">{rangeRequestsLabel}</span>
-                <div className="flex size-9 items-center justify-center rounded-lg bg-primary/12 text-primary">
-                  <Activity className="size-4" />
+                <span className="truncate text-[11.5px] font-medium text-muted-foreground">{rangeRequestsLabel}</span>
+                <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/15">
+                  <Activity className="size-3.5" />
                 </div>
               </div>
               <div className={usageStatValueClass}>
                 {formatTokens(rangeRequests, showFullUsageNumbers)}
               </div>
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground leading-snug">
-                <span className="text-[hsl(var(--success))]">● {t('usage.success')}: {formatTokens(successRequests, showFullUsageNumbers)}</span>
-                <span>● {t('usage.cumulative')}: {formatTokens(cumulativeRequests, showFullUsageNumbers)}</span>
+              <div className="mt-auto flex flex-wrap items-center gap-x-2 gap-y-0.5 border-t border-border/45 pt-2 text-[11px] leading-snug text-muted-foreground tabular-nums">
+                <span className="text-emerald-600 dark:text-emerald-400">● {t('usage.success')} {formatTokens(successRequests, showFullUsageNumbers)}</span>
+                <span>· {t('usage.cumulative')} {formatTokens(cumulativeRequests, showFullUsageNumbers)}</span>
               </div>
             </CardContent>
           </Card>
 
-          <Card className="min-w-0 py-0">
+          <Card className="min-w-0 rounded-2xl border-border/75 bg-card py-0 shadow-2xs transition-colors hover:border-border">
             <CardContent className={usageStatCardContentClass}>
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-bold uppercase text-muted-foreground">{rangeTokensLabel}</span>
-                <div className="flex size-9 items-center justify-center rounded-lg bg-[hsl(var(--info-bg))] text-[hsl(var(--info))]">
-                  <Box className="size-4" />
+                <span className="truncate text-[11.5px] font-medium text-muted-foreground">{rangeTokensLabel}</span>
+                <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-sky-500/12 text-sky-600 ring-1 ring-sky-500/20 dark:text-sky-400">
+                  <Box className="size-3.5" />
                 </div>
               </div>
               <div className={usageStatValueClass}>
                 {formatTokens(rangeTokens, showFullUsageNumbers)}
               </div>
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground leading-snug">
-                <span>{t('usage.totalInputTokens')}: {formatTokens(rangePromptTokens, showFullUsageNumbers)}</span>
-                <span>{t('usage.outputTokens')}: {formatTokens(rangeCompletionTokens, showFullUsageNumbers)}</span>
-                <span>{t('usage.cumulative')}: {formatTokens(cumulativeTokens, showFullUsageNumbers)}</span>
+              <div className="mt-auto flex flex-wrap items-center gap-x-2 gap-y-0.5 border-t border-border/45 pt-2 text-[11px] leading-snug text-muted-foreground tabular-nums">
+                <span>↓{formatTokens(rangePromptTokens, showFullUsageNumbers)}</span>
+                <span>↑{formatTokens(rangeCompletionTokens, showFullUsageNumbers)}</span>
+                <span>· {t('usage.cumulative')} {formatTokens(cumulativeTokens, showFullUsageNumbers)}</span>
               </div>
             </CardContent>
           </Card>
 
-          <Card className="min-w-0 py-0">
+          <Card className="min-w-0 rounded-2xl border-border/75 bg-card py-0 shadow-2xs transition-colors hover:border-border">
             <CardContent className={usageStatCardContentClass}>
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-bold uppercase text-muted-foreground">{rangeCostLabel}</span>
-                <div className="flex size-9 items-center justify-center rounded-lg bg-emerald-500/12 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-300">
-                  <CircleDollarSign className="size-4" />
+                <span className="truncate text-[11.5px] font-medium text-muted-foreground">{rangeCostLabel}</span>
+                <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-emerald-500/12 text-emerald-600 ring-1 ring-emerald-500/20 dark:text-emerald-400">
+                  <CircleDollarSign className="size-3.5" />
                 </div>
               </div>
               <div className={`${usageStatValueClass} text-emerald-600 dark:text-emerald-400`}>
                 {formatCostCardValue(rangeUserBilled)}
               </div>
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground leading-snug">
-                <span>{t('usage.accountCost')}: {formatCostCardValue(rangeAccountBilled)}</span>
-                <span>{t('usage.cumulative')}: {formatCostCardValue(cumulativeUserBilled)}</span>
-                <span>{t('usage.cumulativeAccountCost')}: {formatCostCardValue(cumulativeAccountBilled)}</span>
+              <div className="mt-auto flex flex-wrap items-center gap-x-2 gap-y-0.5 border-t border-border/45 pt-2 text-[11px] leading-snug text-muted-foreground tabular-nums">
+                <span>{t('usage.accountCost')} {formatCostCardValue(rangeAccountBilled)}</span>
+                <span>· {t('usage.cumulative')} {formatCostCardValue(cumulativeUserBilled)}</span>
               </div>
             </CardContent>
           </Card>
 
-          <Card className="min-w-0 py-0">
+          <Card className="min-w-0 rounded-2xl border-border/75 bg-card py-0 shadow-2xs transition-colors hover:border-border">
             <CardContent className={usageStatCardContentClass}>
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-bold uppercase text-muted-foreground">RPM</span>
-                <div className="flex size-9 items-center justify-center rounded-lg bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]">
-                  <Clock className="size-4" />
+                <span className="truncate text-[11.5px] font-medium text-muted-foreground">RPM</span>
+                <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-violet-500/12 text-violet-600 ring-1 ring-violet-500/20 dark:text-violet-400">
+                  <Clock className="size-3.5" />
                 </div>
               </div>
               <div className={usageStatValueClass}>
-                {Math.round(rpm)}
+                {Math.round(rpm).toLocaleString()}
               </div>
-              <div className="text-[11px] text-muted-foreground leading-snug">{t('usage.rpmDesc')}</div>
+              <div className="mt-auto border-t border-border/45 pt-2 text-[11px] leading-snug text-muted-foreground">{t('usage.rpmDesc')}</div>
             </CardContent>
           </Card>
 
-          <Card className="min-w-0 py-0">
+          <Card className="min-w-0 rounded-2xl border-border/75 bg-card py-0 shadow-2xs transition-colors hover:border-border">
             <CardContent className={usageStatCardContentClass}>
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-bold uppercase text-muted-foreground">TPM</span>
-                <div className="flex size-9 items-center justify-center rounded-lg bg-destructive/12 text-destructive">
-                  <Zap className="size-4" />
+                <span className="truncate text-[11.5px] font-medium text-muted-foreground">TPM</span>
+                <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-amber-500/12 text-amber-600 ring-1 ring-amber-500/20 dark:text-amber-400">
+                  <Zap className="size-3.5" />
                 </div>
               </div>
               <div className={usageStatValueClass}>
                 {formatTokens(tpm, showFullUsageNumbers)}
               </div>
-              <div className="text-[11px] text-muted-foreground leading-snug">{t('usage.tpmDesc')}</div>
+              <div className="mt-auto border-t border-border/45 pt-2 text-[11px] leading-snug text-muted-foreground">{t('usage.tpmDesc')}</div>
             </CardContent>
           </Card>
 
-          <Card className="min-w-0 py-0">
+          <Card className="min-w-0 rounded-2xl border-border/75 bg-card py-0 shadow-2xs transition-colors hover:border-border">
             <CardContent className={usageStatCardContentClass}>
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-bold uppercase text-muted-foreground">{t('usage.errorRateCard')}</span>
-                <div className="flex size-9 items-center justify-center rounded-lg bg-[hsl(var(--warning-bg))] text-[hsl(var(--warning))]">
-                  <AlertTriangle className="size-4" />
+                <span className="truncate text-[11.5px] font-medium text-muted-foreground">{t('usage.errorRateCard')}</span>
+                <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-rose-500/12 text-rose-600 ring-1 ring-rose-500/20 dark:text-rose-400">
+                  <AlertTriangle className="size-3.5" />
                 </div>
               </div>
-              <div className={usageStatValueClass}>
+              <div className={cn(usageStatValueClass, errorRate > 5 ? 'text-rose-600 dark:text-rose-400' : errorRate > 0 ? 'text-amber-600 dark:text-amber-400' : '')}>
                 {errorRate.toFixed(1)}%
               </div>
-              <div className="text-[11px] text-muted-foreground leading-snug">{t('usage.avgLatencyInline', { value: Math.round(avgDurationMs) })}</div>
+              <div className="mt-auto border-t border-border/45 pt-2 text-[11px] leading-snug text-muted-foreground tabular-nums">{t('usage.avgLatencyInline', { value: Math.round(avgDurationMs) })}</div>
             </CardContent>
           </Card>
         </div>
@@ -2060,12 +2044,17 @@ export default function Usage() {
         </div>
 
         {/* Logs table */}
-        <Card>
-          <CardContent className="p-4">
+        <Card className="rounded-2xl border-border/75 bg-card py-0 shadow-2xs">
+          <CardContent className="p-5">
             <div className="mb-4 flex items-center justify-between gap-3 overflow-visible max-lg:flex-col max-lg:items-stretch max-lg:overflow-visible">
-              <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-                <h3 className="shrink-0 whitespace-nowrap text-base font-semibold text-foreground">{t('usage.requestLogs')}</h3>
-                <div className="inline-flex max-w-full flex-wrap rounded-xl border border-border/70 bg-muted/40 p-1 shadow-2xs">
+              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2.5 sm:gap-3">
+                <div className="flex items-center gap-2">
+                  <h3 className="shrink-0 whitespace-nowrap text-[15.5px] font-semibold tracking-tight text-foreground">{t('usage.requestLogs')}</h3>
+                  <span className="inline-flex h-5.5 items-center rounded-full bg-muted/65 px-2.5 font-sans text-[11.5px] font-medium text-muted-foreground tabular-nums">
+                    {logsLoading ? t('common.loading') : t('usage.recordsCount', { count: logsTotal })}
+                  </span>
+                </div>
+                <div className="inline-flex max-w-full flex-wrap rounded-xl border border-border/70 bg-muted/40 p-0.5 shadow-2xs">
                   {USAGE_TIME_RANGE_OPTIONS.map((key) => {
                     const active = timeRange === key
                     return (
@@ -2078,9 +2067,9 @@ export default function Usage() {
                           setShowCustomPopover(false)
                         }}
                         className={cn(
-                          'whitespace-nowrap px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-150',
+                          'whitespace-nowrap rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-150',
                           active
-                            ? 'bg-background text-foreground shadow-xs ring-1 ring-border/50 font-bold'
+                            ? 'bg-background text-foreground shadow-2xs ring-1 ring-border/60'
                             : 'text-muted-foreground hover:bg-background/40 hover:text-foreground'
                         )}
                       >
@@ -2091,23 +2080,27 @@ export default function Usage() {
                   <button
                     ref={customChipRef}
                     type="button"
+                    aria-expanded={showCustomPopover}
+                    title={timeRange === 'custom' && customRange ? `${formatBeijingTime(customRange.start)} → ${formatBeijingTime(customRange.end)}` : t('usage.customRangeTitle')}
                     onClick={() => setShowCustomPopover((v) => !v)}
                     className={cn(
-                      'whitespace-nowrap px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-150',
-                      timeRange === 'custom'
-                        ? 'bg-background text-foreground shadow-xs ring-1 ring-border/50 font-bold'
+                      'inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1 text-xs font-medium tabular-nums transition-all duration-150',
+                      timeRange === 'custom' || showCustomPopover
+                        ? 'bg-background text-foreground shadow-2xs ring-1 ring-border/60'
                         : 'text-muted-foreground hover:bg-background/40 hover:text-foreground'
                     )}
                   >
+                    <CalendarDays className={cn('size-3.5', (timeRange === 'custom' || showCustomPopover) && 'text-primary')} />
                     {timeRange === 'custom' && customRange
-                      ? t('usage.customRangeChipApplied')
+                      ? (formatCustomRangeChipLabel(customRange) || t('usage.customRangeChipApplied'))
                       : t('usage.customRange')}
                   </button>
                 </div>
                 {showCustomPopover && (
-                  <CustomRangePopover
+                  <UsageDateRangePopover
                     anchorRef={customChipRef}
                     initial={customRange}
+                    maxDays={CUSTOM_RANGE_MAX_DAYS}
                     onCancel={() => setShowCustomPopover(false)}
                     onApply={(range) => {
                       setCustomRange(range)
@@ -2119,10 +2112,10 @@ export default function Usage() {
                 )}
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                <span className="whitespace-nowrap text-xs text-muted-foreground">{logsLoading ? t('common.loading') : t('usage.recordsCount', { count: logsTotal })}</span>
                 <Button
                   variant="outline"
                   size="sm"
+                  className="h-8 rounded-lg"
                   disabled={logsLoading}
                   title={t('common.refresh')}
                   aria-label={t('common.refresh')}
@@ -2135,8 +2128,9 @@ export default function Usage() {
                   {t('common.refresh')}
                 </Button>
                 <Button
-                  variant="destructive"
+                  variant="outline"
                   size="sm"
+                  className="h-8 rounded-lg border-destructive/25 text-destructive hover:bg-destructive/10 hover:text-destructive"
                   disabled={clearing || logs.length === 0}
                   onClick={async () => {
                     const confirmed = await confirm({
@@ -2166,29 +2160,34 @@ export default function Usage() {
               </div>
             </div>
 
-            {/* 状态快速筛选 */}
-            <div className="mb-3 flex flex-wrap items-center gap-1.5">
-              {statusFilterOptions.map((option) => (
-                <button
-                  key={option.value || 'all'}
-                  type="button"
-                  onClick={() => { setFilterStatus(option.value); setPage(1) }}
-                  className={cn(
-                    'h-8 rounded-lg border px-3 text-[13px] font-medium transition-colors',
-                    filterStatus === option.value
-                      ? 'border-primary/35 bg-primary/10 text-primary shadow-sm'
-                      : 'border-border bg-background text-muted-foreground hover:bg-muted/60 hover:text-foreground',
-                    filterStatus !== option.value && option.tone,
-                  )}
-                >
-                  {option.label}
-                </button>
-              ))}
+            {/* 状态快速筛选（紧凑分段胶囊条） */}
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <div className="inline-flex max-w-full flex-wrap items-center gap-0.5 rounded-xl border border-border/65 bg-muted/35 p-1">
+                {statusFilterOptions.map((option) => {
+                  const active = filterStatus === option.value
+                  return (
+                    <button
+                      key={option.value || 'all'}
+                      type="button"
+                      onClick={() => { setFilterStatus(option.value); setPage(1) }}
+                      className={cn(
+                        'h-7 rounded-lg px-2.5 text-xs font-medium transition-all duration-150',
+                        active
+                          ? 'bg-background text-foreground shadow-2xs ring-1 ring-border/65'
+                          : 'text-muted-foreground hover:bg-background/50 hover:text-foreground',
+                        !active && option.tone,
+                      )}
+                    >
+                      {option.label}
+                    </button>
+                  )
+                })}
+              </div>
               {filterStatus && !statusFilterOptions.some((option) => option.value === filterStatus) ? (
                 <button
                   type="button"
                   onClick={() => { setFilterStatus(''); setPage(1) }}
-                  className="inline-flex h-8 items-center gap-1 rounded-lg border border-primary/35 bg-primary/10 px-3 text-[13px] font-medium text-primary shadow-sm"
+                  className="inline-flex h-8 items-center gap-1 rounded-lg border border-primary/30 bg-primary/8 px-2.5 text-xs font-medium text-primary transition-colors hover:bg-primary/14"
                   title={t('usage.clearStatusFilter')}
                 >
                   HTTP {filterStatus}
@@ -2201,10 +2200,10 @@ export default function Usage() {
             {errorSummary && errorSummary.total_errors > 0 ? (
               <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7">
                 {[
-                  { label: t('usage.errorTotal'), value: errorSummary.total_errors, status: 'error' as UsageStatusFilter },
+                  { label: t('usage.errorTotal'), value: errorSummary.total_errors, status: 'error' as UsageStatusFilter, danger: true },
                   { label: '4xx', value: errorSummary.status_4xx, status: '4xx' as UsageStatusFilter },
-                  { label: '5xx', value: errorSummary.status_5xx, status: '5xx' as UsageStatusFilter },
-                  { label: '401', value: errorSummary.unauthorized, status: '401' as UsageStatusFilter },
+                  { label: '5xx', value: errorSummary.status_5xx, status: '5xx' as UsageStatusFilter, danger: errorSummary.status_5xx > 0 },
+                  { label: '401', value: errorSummary.unauthorized, status: '401' as UsageStatusFilter, danger: errorSummary.unauthorized > 0 },
                   { label: '429', value: errorSummary.rate_limited, status: '429' as UsageStatusFilter },
                   { label: '499', value: errorSummary.canceled, status: '499' as UsageStatusFilter },
                   { label: t('usage.retryRequests'), value: errorSummary.retry_attempts, retry: 'true' as UsageRetryFilter },
@@ -2220,10 +2219,10 @@ export default function Usage() {
                       }
                       setPage(1)
                     }}
-                    className="flex min-w-0 items-center justify-between gap-2 rounded-lg border border-border/80 bg-muted/25 px-3 py-2 text-left transition-colors hover:border-primary/30 hover:bg-primary/5"
+                    className="flex min-w-0 items-center justify-between gap-2 rounded-xl border border-border/65 bg-muted/20 px-3 py-1.5 text-left transition-colors hover:border-border hover:bg-muted/45"
                   >
                     <span className="truncate text-[11px] font-medium text-muted-foreground">{item.label}</span>
-                    <span className="font-geist-mono text-[13px] font-semibold tabular-nums text-foreground">
+                    <span className={cn('font-sans text-[12.5px] font-semibold tabular-nums', item.danger ? 'text-rose-600 dark:text-rose-400' : 'text-foreground')}>
                       {item.value.toLocaleString()}
                     </span>
                   </button>
@@ -2232,7 +2231,7 @@ export default function Usage() {
             ) : null}
 
             {/* 主筛选栏 */}
-            <div className="toolbar-surface mb-4 overflow-visible">
+            <div className="mb-4 overflow-visible rounded-xl border border-border/65 bg-muted/25 p-2.5">
               <div className="flex flex-wrap items-center gap-2 max-lg:gap-1.5">
                 <div className="relative min-w-60 flex-1 max-sm:w-full">
                   <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -2462,7 +2461,10 @@ export default function Usage() {
                   return (
                     <div
                       key={log.id}
-                      className="min-w-0 rounded-xl border border-border bg-background/70 p-3.5 shadow-sm"
+                      className={cn(
+                        'min-w-0 rounded-xl border border-border/75 bg-card/85 p-3.5 shadow-2xs transition-colors',
+                        log.status_code >= 400 && 'border-rose-500/25 bg-rose-500/[0.03]',
+                      )}
                     >
                       {/* flex-wrap + nowrap 时间：徽标再多也只会把时间挤到下一行，不会挤出视口（issue #522） */}
                       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -2487,29 +2489,30 @@ export default function Usage() {
                             </Badge>
                           ) : null}
                           {visibleColumns.model && (
-                            <Badge
-                              variant="outline"
-                              className={`${usageTableBadgeClass} ${usageClickableFilterClass} max-w-full whitespace-normal ${log.ultra ? 'usage-ultra-model' : ''} ${filterModel === log.model ? 'border-primary/50 text-primary' : ''}`}
-                              role="button"
-                              tabIndex={0}
+                            <button
+                              type="button"
+                              className={cn(
+                                'inline-flex h-[24px] max-w-full items-center gap-1.5 rounded-full border border-border/75 bg-background/95 px-2.5 text-left font-sans text-[12px] font-medium tracking-[-0.01em] text-foreground shadow-[0_1px_1px_rgba(15,23,42,0.04)] transition-all hover:border-primary/40 hover:bg-primary/[0.04] hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:border-border/80 dark:bg-muted/35',
+                                log.ultra && 'usage-ultra-model',
+                                filterModel === log.model && 'border-primary/45 bg-primary/10 text-primary ring-1 ring-primary/15',
+                              )}
                               title={usageRequestedModelTitle(
                                 log,
                                 t('usage.ultraModeHint'),
                                 t('usage.filterByModelHint', { model: log.model || '-' }),
                               )}
                               onClick={() => toggleModelFilter(log.model)}
-                              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleModelFilter(log.model) } }}
                             >
                               {(log.channel === 'codex' || log.channel === 'grok' || log.channel === 'antigravity' || log.channel === 'claude' || log.channel === 'kiro' || log.channel === 'opencode') && (
                                 <ChannelLogo
                                   channel={log.channel}
                                   size={13}
-                                  className="mr-1"
+                                  className="shrink-0"
                                   title={log.channel === 'grok' ? 'Grok' : log.channel === 'antigravity' ? 'Antigravity' : log.channel === 'claude' ? 'Claude' : log.channel === 'kiro' ? 'Kiro' : log.channel === 'opencode' ? 'OpenCode' : 'Codex'}
                                 />
                               )}
-                              <span className="min-w-0 break-all text-left">{log.model || '-'}</span>
-                            </Badge>
+                              <span className="min-w-0 truncate">{log.model || '-'}</span>
+                            </button>
                           )}
                           {log.reasoning_effort ? (
                             <ReasoningEffortBadge effort={log.reasoning_effort} />
@@ -2591,15 +2594,15 @@ export default function Usage() {
                           {visibleColumns.token && (
                             <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
                               <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableToken')}</div>
-                              <div className="mt-1 font-mono tabular-nums">
+                              <div className="mt-1 inline-flex items-center gap-1.5 font-sans text-[12.5px] font-medium tabular-nums">
                                 {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
                                   <>
                                     <UsageInputTokenCount log={log} />
-                                    <span className="mx-0.5 text-border">/</span>
-                                    <span className="text-emerald-500">↑{formatTokens(log.output_tokens, true)}</span>
+                                    <span aria-hidden="true" className="h-3 w-px bg-border/80" />
+                                    <span className="text-emerald-600 dark:text-emerald-400">↑{formatTokens(log.output_tokens, true)}</span>
                                   </>
                                 ) : (
-                                  <span className="text-muted-foreground">-</span>
+                                  <span className="text-muted-foreground/50">—</span>
                                 )}
                               </div>
                             </div>
@@ -2698,14 +2701,20 @@ export default function Usage() {
                   </TableHeader>
                   <TableBody>
                     {logs.map((log: UsageLog) => {
+                      const isErrorRow = log.status_code >= 400
                       return (
-                      <TableRow key={log.id}>
+                      <TableRow
+                        key={log.id}
+                        className={cn(
+                          isErrorRow && 'bg-rose-500/[0.03] shadow-[inset_2px_0_0_0_rgba(244,63,94,0.6)] hover:!bg-rose-500/[0.06]',
+                        )}
+                      >
                         {visibleColumns.status && <TableCell>
                           <div className="flex items-center gap-1.5">
                             <button
                               type="button"
                               onClick={() => { setFilterStatus(String(log.status_code) as UsageStatusFilter); setPage(1) }}
-                              className="rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                               title={t('usage.filterByStatus', { status: log.status_code })}
                             >
                               <StatusCodeBadge log={log} />
@@ -2714,55 +2723,56 @@ export default function Usage() {
                           </div>
                         </TableCell>}
                         {visibleColumns.model && <TableCell>
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            {log.via_websocket && (
-                              <Badge
-                                variant="outline"
-                                title="WebSocket"
-                                className="text-[11px] font-semibold uppercase border-transparent bg-cyan-500/12 text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-400"
-                              >
-                                ws
-                              </Badge>
-                            )}
-                            <Badge
-                              variant="outline"
-                              className={`${usageTableBadgeClass} ${usageClickableFilterClass} ${log.ultra ? 'usage-ultra-model' : ''} ${filterModel === log.model ? 'border-primary/50 text-primary' : ''}`}
-                              role="button"
-                              tabIndex={0}
-                              title={usageRequestedModelTitle(
-                                log,
-                                t('usage.ultraModeHint'),
-                                t('usage.filterByModelHint', { model: log.model || '-' }),
+                          <div className="flex flex-col items-start gap-1">
+                            <div className="flex items-center gap-1.5 whitespace-nowrap">
+                              {log.via_websocket && (
+                                <span
+                                  title="WebSocket"
+                                  className="inline-flex h-[20px] shrink-0 items-center rounded-md bg-sky-500/[0.09] px-1.5 font-sans text-[10px] font-semibold uppercase leading-none text-sky-700 ring-1 ring-inset ring-sky-500/20 dark:bg-sky-500/15 dark:text-sky-300"
+                                >
+                                  WS
+                                </span>
                               )}
-                              onClick={() => toggleModelFilter(log.model)}
-                              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleModelFilter(log.model) } }}
-                            >
-                              {(log.channel === 'codex' || log.channel === 'grok' || log.channel === 'antigravity' || log.channel === 'claude' || log.channel === 'kiro' || log.channel === 'opencode') && (
-                                <ChannelLogo
-                                  channel={log.channel}
-                                  size={13}
-                                  className="mr-1"
-                                  title={log.channel === 'grok' ? 'Grok' : log.channel === 'antigravity' ? 'Antigravity' : log.channel === 'claude' ? 'Claude' : log.channel === 'kiro' ? 'Kiro' : log.channel === 'opencode' ? 'OpenCode' : 'Codex'}
-                                />
-                              )}
-                              {log.model || '-'}
-                            </Badge>
-                            {log.reasoning_effort ? (
-                              <ReasoningEffortBadge effort={log.reasoning_effort} />
-                            ) : null}
-                            {isImageUsageLog(log) && (
-                              <ImageUsageBadge log={log} />
-                            )}
-                            {isFastTier(log.billing_service_tier || log.service_tier) && (
-                              <Badge
-                                variant="outline"
-                                className="text-[11px] font-semibold gap-0.5 border-transparent bg-blue-500/12 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400"
-                                title={`${t('usage.billingTier')}: ${formatServiceTierLabel(t, log.billing_service_tier || log.service_tier)}`}
+                              <button
+                                type="button"
+                                className={cn(
+                                  'inline-flex h-[24px] shrink-0 items-center gap-1.5 rounded-full border border-border/75 bg-background/95 px-2.5 text-left font-sans text-[12px] font-medium tracking-[-0.01em] text-foreground shadow-[0_1px_1px_rgba(15,23,42,0.04)] transition-all hover:border-primary/40 hover:bg-primary/[0.04] hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:border-border/80 dark:bg-muted/35',
+                                  log.ultra && 'usage-ultra-model',
+                                  filterModel === log.model && 'border-primary/45 bg-primary/10 text-primary ring-1 ring-primary/15',
+                                )}
+                                title={usageRequestedModelTitle(
+                                  log,
+                                  t('usage.ultraModeHint'),
+                                  t('usage.filterByModelHint', { model: log.model || '-' }),
+                                )}
+                                onClick={() => toggleModelFilter(log.model)}
                               >
-                                <Zap className="size-3" />
-                                {formatServiceTierLabel(t, log.billing_service_tier || log.service_tier)}
-                              </Badge>
-                            )}
+                                {(log.channel === 'codex' || log.channel === 'grok' || log.channel === 'antigravity' || log.channel === 'claude' || log.channel === 'kiro' || log.channel === 'opencode') && (
+                                  <ChannelLogo
+                                    channel={log.channel}
+                                    size={13}
+                                    className="shrink-0"
+                                    title={log.channel === 'grok' ? 'Grok' : log.channel === 'antigravity' ? 'Antigravity' : log.channel === 'claude' ? 'Claude' : log.channel === 'kiro' ? 'Kiro' : log.channel === 'opencode' ? 'OpenCode' : 'Codex'}
+                                  />
+                                )}
+                                <span className="max-w-[220px] truncate">{log.model || '-'}</span>
+                              </button>
+                              {log.reasoning_effort ? (
+                                <ReasoningEffortBadge effort={log.reasoning_effort} />
+                              ) : null}
+                              {isImageUsageLog(log) && (
+                                <ImageUsageBadge log={log} />
+                              )}
+                              {isFastTier(log.billing_service_tier || log.service_tier) && (
+                                <span
+                                  className="inline-flex h-[20px] shrink-0 items-center gap-0.5 rounded-md bg-blue-500/[0.09] px-1.5 font-sans text-[10.5px] font-medium leading-none text-blue-700 ring-1 ring-inset ring-blue-500/20 dark:bg-blue-500/15 dark:text-blue-300"
+                                  title={`${t('usage.billingTier')}: ${formatServiceTierLabel(t, log.billing_service_tier || log.service_tier)}`}
+                                >
+                                  <Zap className="size-2.5" />
+                                  {formatServiceTierLabel(t, log.billing_service_tier || log.service_tier)}
+                                </span>
+                              )}
+                            </div>
                             {showUpstreamModelMismatch && log.upstream_model_mismatch === true && log.upstream_response_model && (
                               <UpstreamResponseModelBadge log={log} sentModel={log.effective_model || log.model} />
                             )}
@@ -2784,14 +2794,20 @@ export default function Usage() {
                             </span>
                           )}
                         </TableCell>}
-                        {visibleColumns.apiKey && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
-                          <span className="block max-w-[180px] truncate whitespace-nowrap font-mono text-[12px]" title={formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}>
-                            {formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}
-                          </span>
+                        {visibleColumns.apiKey && <TableCell className={usageTableTextClass}>
+                          {formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) ? (
+                            <span className="block max-w-[160px] truncate whitespace-nowrap font-mono text-[11.5px] text-muted-foreground" title={formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked)}>
+                              {formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked)}
+                            </span>
+                          ) : (
+                            <span className="block whitespace-nowrap text-[11.5px] text-muted-foreground/45" title={t('usage.unknownApiKey')}>
+                              {t('usage.unknownApiKey')}
+                            </span>
+                          )}
                         </TableCell>}
-                        {visibleColumns.clientIp && <TableCell className={`${usageTableMonoClass} text-muted-foreground whitespace-nowrap`}>
-                          <span title={log.client_ip || '-'}>
-                            {log.client_ip || '-'}
+                        {visibleColumns.clientIp && <TableCell className={`${usageTableMonoClass} whitespace-nowrap`}>
+                          <span className={log.client_ip ? 'text-muted-foreground' : 'text-muted-foreground/45'} title={log.client_ip || '-'}>
+                            {log.client_ip || '—'}
                           </span>
                         </TableCell>}
                         {visibleColumns.userAgent && <TableCell>
@@ -2811,7 +2827,7 @@ export default function Usage() {
                           </div>
                         </TableCell>}
                         {visibleColumns.type && <TableCell>
-                          <div className="flex flex-col items-start gap-1.5">
+                          <div className="flex items-center gap-1 whitespace-nowrap">
                             <StreamBadge stream={log.stream} />
                             <UsageDaybreakBadge program={log.daybreak_program} />
                             <CompactionBadges
@@ -2823,19 +2839,25 @@ export default function Usage() {
                         </TableCell>}
                         {visibleColumns.token && <TableCell className="text-right">
                           {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
-                            <div className={`${usageTableMonoClass} whitespace-nowrap leading-relaxed`}>
+                            <div className={`${usageTableNumClass} inline-flex items-center justify-end gap-1.5 whitespace-nowrap`}>
                               <UsageInputTokenCount log={log} />
-                              <span className="mx-1 text-border">|</span>
-                              <span className="text-emerald-500">↑{formatTokens(log.output_tokens, true)}</span>
+                              <span aria-hidden="true" className="h-3 w-px bg-border/80" />
+                              <span className="inline-flex items-baseline gap-0.5 text-emerald-600 dark:text-emerald-400">
+                                <span className="text-[11px] opacity-65">↑</span>
+                                <span>{formatTokens(log.output_tokens, true)}</span>
+                              </span>
                               {log.reasoning_tokens > 0 && (
                                 <>
-                                  <span className="mx-1 text-border">|</span>
-                                  <span className="text-amber-500 inline-flex items-center gap-0.5"><Brain className="size-3.5 inline" />{formatTokens(log.reasoning_tokens, true)}</span>
+                                  <span aria-hidden="true" className="h-3 w-px bg-border/80" />
+                                  <span className="inline-flex items-center gap-0.5 text-amber-600 dark:text-amber-400">
+                                    <Brain className="size-3 shrink-0 opacity-80" />
+                                    <span>{formatTokens(log.reasoning_tokens, true)}</span>
+                                  </span>
                                 </>
                               )}
                             </div>
                           ) : (
-                            <span className={`${usageTableMonoClass} text-muted-foreground/50`}>-</span>
+                            <span className={`${usageTableNumClass} text-muted-foreground/45`}>—</span>
                           )}
                         </TableCell>}
                         {visibleColumns.cached && <TableCell className="text-right">
@@ -2844,12 +2866,12 @@ export default function Usage() {
                         {visibleColumns.wsAcquire && <TableCell className="text-right">
                           {(log.ws_acquire_ms ?? 0) > 0 ? (
                             <span
-                              className={`${usageTableMonoClass} ${(log.ws_acquire_ms as number) > 5000 ? 'text-red-500' : (log.ws_acquire_ms as number) > 1000 ? 'text-amber-500' : 'text-muted-foreground'}`}
+                              className={`${usageTableNumClass} ${(log.ws_acquire_ms as number) > 5000 ? 'text-rose-600 dark:text-rose-400' : (log.ws_acquire_ms as number) > 1000 ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground'}`}
                               title={t('usage.wsAcquireTooltip')}
                             >
                               {(log.ws_acquire_ms as number) > 1000 ? `${((log.ws_acquire_ms as number) / 1000).toFixed(1)}s` : `${log.ws_acquire_ms}ms`}
                             </span>
-                          ) : <span className={`${usageTableMonoClass} text-muted-foreground/50`}>-</span>}
+                          ) : <span className={`${usageTableNumClass} text-muted-foreground/45`}>—</span>}
                         </TableCell>}
                         {visibleColumns.timing && (
                           <TableCell className="text-right">
@@ -2867,7 +2889,7 @@ export default function Usage() {
                         {visibleColumns.error && <TableCell>
                           <UsageErrorSummaryCell log={log} />
                         </TableCell>}
-                        {visibleColumns.time && <TableCell className={`${usageTableMonoClass} text-right whitespace-nowrap`}>
+                        {visibleColumns.time && <TableCell className="text-right whitespace-nowrap">
                           <UsageTimeCell value={log.created_at} />
                         </TableCell>}
                       </TableRow>
@@ -2897,150 +2919,5 @@ export default function Usage() {
         {confirmDialog}
       </>
     </StateShell>
-  )
-}
-
-// CustomRangePopover 通过 React portal 渲染在 body 下,不受外层 overflow 裁切。
-// 位置根据触发按钮 rect 计算,自动避开右边界。
-function CustomRangePopover({
-  anchorRef,
-  initial,
-  onApply,
-  onCancel,
-}: {
-  anchorRef: React.RefObject<HTMLButtonElement | null>
-  initial: CustomRange | null
-  onApply: (range: CustomRange) => void
-  onCancel: () => void
-}) {
-  const { t } = useTranslation()
-  const now = new Date()
-  const defaultEnd = initial ? new Date(initial.end) : now
-  const defaultStart = initial
-    ? new Date(initial.start)
-    : new Date(now.getTime() - 24 * 60 * 60 * 1000)
-
-  const [startStr, setStartStr] = useState(dateToLocalInputValue(defaultStart))
-  const [endStr, setEndStr] = useState(dateToLocalInputValue(defaultEnd))
-  const [error, setError] = useState<string | null>(null)
-  const popoverRef = useRef<HTMLDivElement>(null)
-  const [position, setPosition] = useState<{ top: number; left: number } | null>(null)
-  const POPOVER_WIDTH = 320
-
-  const recompute = useCallback(() => {
-    const anchor = anchorRef.current
-    if (!anchor) return
-    const rect = anchor.getBoundingClientRect()
-    const top = rect.bottom + 6
-    // 默认让 popover 右边对齐 anchor 右边;若超出窗口左边,夹到 8px 边距。
-    const desiredLeft = rect.right - POPOVER_WIDTH
-    const left = Math.max(8, Math.min(window.innerWidth - POPOVER_WIDTH - 8, desiredLeft))
-    setPosition({ top, left })
-  }, [anchorRef])
-
-  useLayoutEffect(() => {
-    recompute()
-  }, [recompute])
-
-  useEffect(() => {
-    const handle = () => recompute()
-    window.addEventListener('resize', handle)
-    window.addEventListener('scroll', handle, true)
-    return () => {
-      window.removeEventListener('resize', handle)
-      window.removeEventListener('scroll', handle, true)
-    }
-  }, [recompute])
-
-  useEffect(() => {
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target as Node | null
-      if (!target) return
-      if (popoverRef.current?.contains(target)) return
-      if (anchorRef.current?.contains(target)) return
-      onCancel()
-    }
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onCancel()
-    }
-    document.addEventListener('pointerdown', handlePointerDown)
-    document.addEventListener('keydown', handleEscape)
-    return () => {
-      document.removeEventListener('pointerdown', handlePointerDown)
-      document.removeEventListener('keydown', handleEscape)
-    }
-  }, [anchorRef, onCancel])
-
-  const handleApply = () => {
-    const startDate = localInputValueToDate(startStr)
-    const endDate = localInputValueToDate(endStr)
-    if (!startDate || !endDate) {
-      setError(t('usage.customRangeInvalid'))
-      return
-    }
-    if (endDate.getTime() <= startDate.getTime()) {
-      setError(t('usage.customRangeEndBeforeStart'))
-      return
-    }
-    if (endDate.getTime() - startDate.getTime() > CUSTOM_RANGE_MAX_MS) {
-      setError(t('usage.customRangeTooLong', { days: CUSTOM_RANGE_MAX_DAYS }))
-      return
-    }
-    setError(null)
-    onApply({
-      start: dateToLocalRFC3339(startDate),
-      end: dateToLocalRFC3339(endDate),
-    })
-  }
-
-  if (!position) return null
-
-  return createPortal(
-    <div
-      ref={popoverRef}
-      style={{
-        position: 'fixed',
-        top: position.top,
-        left: position.left,
-        width: POPOVER_WIDTH,
-      }}
-      className="z-[1000] rounded-lg border border-border bg-popover p-3 text-popover-foreground shadow-[0_18px_40px_hsl(222_30%_18%/0.18)]"
-    >
-      <div className="mb-2 text-xs font-semibold text-foreground">
-        {t('usage.customRangeTitle')}
-      </div>
-      <div className="space-y-2">
-        <label className="block text-[11px] text-muted-foreground">
-          {t('usage.customRangeStart')}
-          <input
-            type="datetime-local"
-            value={startStr}
-            onChange={(e) => setStartStr(e.target.value)}
-            className="mt-1 block w-full rounded-md border border-border bg-background px-2 py-1 text-xs"
-          />
-        </label>
-        <label className="block text-[11px] text-muted-foreground">
-          {t('usage.customRangeEnd')}
-          <input
-            type="datetime-local"
-            value={endStr}
-            onChange={(e) => setEndStr(e.target.value)}
-            className="mt-1 block w-full rounded-md border border-border bg-background px-2 py-1 text-xs"
-          />
-        </label>
-      </div>
-      {error && (
-        <div className="mt-2 text-[11px] text-destructive">{error}</div>
-      )}
-      <div className="mt-3 flex justify-end gap-2">
-        <Button variant="ghost" size="sm" onClick={onCancel}>
-          {t('common.cancel', { defaultValue: 'Cancel' })}
-        </Button>
-        <Button size="sm" onClick={handleApply}>
-          {t('usage.customRangeApply')}
-        </Button>
-      </div>
-    </div>,
-    document.body,
   )
 }

@@ -4,7 +4,6 @@ import { cn } from '../lib/utils'
 import { getUsageTokenBreakdown } from '../lib/usageTokenDisplay'
 import { formatUsageNumber as formatTokens } from '../lib/usageFormat'
 import { computeOutputTokensPerSec, durationTone, firstTokenTone, formatLatencyMs, formatTokensPerSec } from '../lib/usageTiming'
-import { Badge } from './ui/badge'
 import UsageTimingBadge from './UsageTimingBadge'
 
 type UsageMetricLog = {
@@ -20,8 +19,7 @@ type UsageMetricLog = {
   first_token_ms: number
 }
 
-const usageTableMonoClass = 'font-mono text-[13px] tabular-nums'
-const usageTableBadgeClass = 'text-[13px]'
+const usageTableNumClass = 'font-sans text-[12.5px] font-medium tabular-nums tracking-[-0.01em]'
 
 // 缓存写入图标:取 Lucide (ISC) 的 database-plus,与读取用的 DatabaseZap 成对。
 // 锁定的 lucide-react 1.0.1 还没收录它,升级前在这里按同一路径注册。
@@ -46,14 +44,19 @@ export function UsageInputTokenCount({ log }: { log: UsageMetricLog }) {
     })
     : `${t('usage.inputTokens')}: ${formatTokens(tokens.inputTokens, true)}`
 
-  return <span className="text-blue-500" title={title}>↓{formatTokens(tokens.inputTokens, true)}</span>
+  return (
+    <span className="inline-flex items-baseline gap-0.5 text-sky-600 dark:text-sky-400" title={title}>
+      <span className="text-[11px] opacity-65">↓</span>
+      <span>{formatTokens(tokens.inputTokens, true)}</span>
+    </span>
+  )
 }
 
 export function UsageCacheBadges({ log, align = 'end' }: { log: UsageMetricLog; align?: 'start' | 'end' }) {
   const { t } = useTranslation()
   const tokens = getUsageTokenBreakdown(log)
   if (tokens.cacheReadTokens === 0 && tokens.cacheWriteTokens === 0) {
-    return <span className={`${usageTableMonoClass} text-muted-foreground/50`}>-</span>
+    return <span className={`${usageTableNumClass} text-muted-foreground/45`}>—</span>
   }
   const readTitle = t('usage.cacheReadTooltip', { tokens: formatTokens(tokens.cacheReadTokens, true) })
   const writeTitle = t('usage.cacheCreateTooltip', {
@@ -66,16 +69,24 @@ export function UsageCacheBadges({ log, align = 'end' }: { log: UsageMetricLog; 
   return (
     <div className={cn('flex flex-wrap items-center gap-1', align === 'start' ? 'justify-start' : 'justify-end')}>
       {tokens.cacheReadTokens > 0 && (
-        <Badge variant="outline" title={readTitle} aria-label={readTitle} className={`${usageTableBadgeClass} gap-1 border-transparent bg-indigo-500/10 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400`}>
-          <DatabaseZap className="size-3.5" aria-hidden="true" />
+        <span
+          title={readTitle}
+          aria-label={readTitle}
+          className="inline-flex h-[22px] items-center gap-1 rounded-md bg-violet-500/[0.08] px-1.5 font-sans text-[11.5px] font-medium tabular-nums text-violet-700 ring-1 ring-inset ring-violet-500/15 dark:bg-violet-500/15 dark:text-violet-300 dark:ring-violet-400/20"
+        >
+          <DatabaseZap className="size-3 shrink-0 opacity-80" aria-hidden="true" />
           {formatTokens(tokens.cacheReadTokens, true)}
-        </Badge>
+        </span>
       )}
       {tokens.cacheWriteTokens > 0 && (
-        <Badge variant="outline" title={writeTitle} aria-label={writeTitle} className={`${usageTableBadgeClass} gap-1 border-transparent bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400`}>
-          <DatabasePlus className="size-3.5" aria-hidden="true" />
+        <span
+          title={writeTitle}
+          aria-label={writeTitle}
+          className="inline-flex h-[22px] items-center gap-1 rounded-md bg-amber-500/[0.09] px-1.5 font-sans text-[11.5px] font-medium tabular-nums text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:bg-amber-500/15 dark:text-amber-300 dark:ring-amber-400/20"
+        >
+          <DatabasePlus className="size-3 shrink-0 opacity-80" aria-hidden="true" />
           {formatTokens(tokens.cacheWriteTokens, true)}
-        </Badge>
+        </span>
       )}
     </div>
   )
@@ -86,29 +97,29 @@ function tokensPerSecClassName(value: number): string {
   if (value >= 80) return 'text-emerald-600 dark:text-emerald-400'
   if (value >= 30) return 'text-foreground'
   if (value >= 10) return 'text-amber-600 dark:text-amber-400'
-  return 'text-red-500 dark:text-red-400'
+  return 'text-rose-600 dark:text-rose-400'
 }
 
 export function TokensPerSecCell({ log }: { log: UsageMetricLog }) {
   const value = computeOutputTokensPerSec(log)
   if (value == null) {
-    return <span className={`${usageTableMonoClass} text-muted-foreground/50`}>-</span>
+    return <span className={`${usageTableNumClass} text-muted-foreground/45`}>—</span>
   }
   return (
-    <span className={`${usageTableMonoClass} ${tokensPerSecClassName(value)}`} title={`${value.toFixed(2)} tok/s`}>
+    <span className={`${usageTableNumClass} ${tokensPerSecClassName(value)}`} title={`${value.toFixed(2)} tok/s`}>
       {formatTokensPerSec(value)}
-      <span className="ml-0.5 text-[11px] font-medium opacity-70">tok/s</span>
+      <span className="ml-0.5 text-[10.5px] font-normal text-muted-foreground/75">tok/s</span>
     </span>
   )
 }
 
-/** 首字 + 总耗时聚合列：横向双色胶囊，避免把整行撑高。 */
+/** 首字 + 总耗时聚合列：横向双胶囊，柔和底色且仅异常态着色。 */
 export function TimingCell({ log }: { log: UsageMetricLog }) {
   const { t } = useTranslation()
   const firstMs = log.first_token_ms || 0
   const durationMs = log.duration_ms || 0
   if (firstMs <= 0 && durationMs <= 0) {
-    return <span className={`${usageTableMonoClass} text-muted-foreground/50`}>-</span>
+    return <span className={`${usageTableNumClass} text-muted-foreground/45`}>—</span>
   }
 
   const firstLabel = firstMs > 0 ? formatLatencyMs(firstMs) : '-'
