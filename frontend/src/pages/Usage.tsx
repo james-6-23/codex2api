@@ -5,7 +5,8 @@ import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts'
 import { api } from '../api'
-import { getTimeRangeISO, type TimeRangeKey } from '../lib/timeRange'
+import { getTimeRangeISO, getBucketConfig, type TimeRangeKey } from '../lib/timeRange'
+import UsageInsightsDeck from '../components/usage/UsageInsightsDeck'
 import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
 import ChannelFilter, { useUsageChannel } from '../components/ChannelFilter'
@@ -22,7 +23,7 @@ import { useDataLoader } from '../hooks/useDataLoader'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
 import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePersistedPageSize'
-import type { APIKeyRow, OpsErrorSummary, SystemSettings, UsageAPIKeyStat, UsageEndpointStat, UsageFeatureStats, UsageLog, UsageModelStat, UsageStats, PromptFilterLog, PromptPolicyIncidentDetailResponse } from '../types'
+import type { APIKeyRow, ChartAggregation, OpsErrorSummary, SystemSettings, UsageAPIKeyStat, UsageEndpointStat, UsageFeatureStats, UsageLog, UsageModelStat, UsageStats, PromptFilterLog, PromptPolicyIncidentDetailResponse } from '../types'
 import { cn, formatCompactEmail } from '../lib/utils'
 import { formatUsageNumber as formatTokens } from '../lib/usageFormat'
 import { buildModelShareData, formatSharePercent, type ModelShareMetric } from '../lib/usageInsights'
@@ -1464,6 +1465,56 @@ export default function Usage() {
   )
   const [showAnalysis, setShowAnalysis] = useState(getInitialAnalysisVisibility)
   const [channel, setChannel] = useUsageChannel()
+  const [insightsChart, setInsightsChart] = useState<ChartAggregation | null>(null)
+  const [insightsChartLoading, setInsightsChartLoading] = useState(false)
+  const insightsChartAbort = useRef<AbortController | null>(null)
+
+  const insightsBucketMinutes = useMemo(() => {
+    if (timeRange === 'custom' && customRange) {
+      const spanHours = Math.max(1, (Date.parse(customRange.end) - Date.parse(customRange.start)) / 3_600_000)
+      if (spanHours <= 2) return 5
+      if (spanHours <= 12) return 30
+      if (spanHours <= 48) return 60
+      if (spanHours <= 24 * 10) return 360
+      return 1440
+    }
+    if (timeRange === 'today') return 60
+    return getBucketConfig((timeRange === 'custom' ? '24h' : timeRange) as TimeRangeKey).bucketMinutes
+  }, [timeRange, customRange])
+
+  const loadInsightsChart = useCallback(async () => {
+    if (!showAnalysis) return
+    insightsChartAbort.current?.abort()
+    const controller = new AbortController()
+    insightsChartAbort.current = controller
+    setInsightsChartLoading(true)
+    try {
+      const { start, end } = resolveRangeISO(timeRange, customRange)
+      const res = await api.getChartData({
+        start,
+        end,
+        bucketMinutes: insightsBucketMinutes,
+        channel: channel || undefined,
+        signal: controller.signal,
+      })
+      if (!controller.signal.aborted) {
+        setInsightsChart(res)
+      }
+    } catch {
+      // 静默容错，不影响日志明细与卡片
+    } finally {
+      if (!controller.signal.aborted) {
+        setInsightsChartLoading(false)
+      }
+    }
+  }, [showAnalysis, timeRange, customRange, insightsBucketMinutes, channel])
+
+  useEffect(() => {
+    void loadInsightsChart()
+    return () => {
+      insightsChartAbort.current?.abort()
+    }
+  }, [loadInsightsChart])
 
   // 搜索防抖：输入停止 400ms 后触发查询
   const handleSearchChange = useCallback((value: string) => {
@@ -1977,12 +2028,33 @@ export default function Usage() {
         </div>
 
         {showAnalysis && (
-          <section className="usage-insights" aria-label={t('usage.usageAnalysis')}>
-            <ModelStatsPanel stats={modelStats} showFullUsageNumbers={showFullUsageNumbers} />
-            <FeatureStatsPanel stats={featureStats} totalRequests={rangeRequests} showFullUsageNumbers={showFullUsageNumbers} />
-            <EndpointStatsPanel stats={endpointStats} totalRequests={rangeRequests} showFullUsageNumbers={showFullUsageNumbers} />
-            <APIKeyStatsPanel stats={apiKeyStats} totalRequests={rangeRequests} showFullUsageNumbers={showFullUsageNumbers} />
-          </section>
+          <div className="space-y-5">
+            <UsageInsightsDeck
+              chartData={insightsChart}
+              chartLoading={insightsChartLoading}
+              usageStats={stats}
+              modelStats={modelStats}
+              endpointStats={endpointStats}
+              apiKeyStats={apiKeyStats}
+              bucketMinutes={insightsBucketMinutes}
+              onSelectModel={(model) => toggleModelFilter(model)}
+              onSelectEndpoint={(endpoint) => {
+                setFilterEndpoint((curr) => (curr === endpoint ? '' : endpoint))
+                setPage(1)
+              }}
+              onSelectApiKey={(apiKeyId) => {
+                const next = String(apiKeyId)
+                setFilterApiKeyId((curr) => (curr === next ? '' : next))
+                setPage(1)
+              }}
+            />
+            <section className="usage-insights" aria-label={t('usage.usageAnalysis')}>
+              <ModelStatsPanel stats={modelStats} showFullUsageNumbers={showFullUsageNumbers} />
+              <FeatureStatsPanel stats={featureStats} totalRequests={rangeRequests} showFullUsageNumbers={showFullUsageNumbers} />
+              <EndpointStatsPanel stats={endpointStats} totalRequests={rangeRequests} showFullUsageNumbers={showFullUsageNumbers} />
+              <APIKeyStatsPanel stats={apiKeyStats} totalRequests={rangeRequests} showFullUsageNumbers={showFullUsageNumbers} />
+            </section>
+          </div>
         )}
         </div>
         </div>

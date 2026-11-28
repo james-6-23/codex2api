@@ -1012,10 +1012,12 @@ func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Tim
 		SELECT
 			datetime((CAST(strftime('%s', created_at) AS INTEGER) / ($3 * 60)) * ($3 * 60), 'unixepoch') AS bucket,
 			COUNT(*), COALESCE(AVG(duration_ms), 0),
+			COALESCE(AVG(CASE WHEN first_token_ms > 0 THEN first_token_ms END), 0),
 			COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(cached_tokens), 0),
 			COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status_code >= 500 AND status_code < 600 THEN 1 ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN status_code >= 500 AND status_code < 600 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(user_billed), 0), COALESCE(SUM(account_billed), 0)
 		FROM usage_logs
 		WHERE created_at >= $1 AND created_at < $2
 		  AND status_code <> 499
@@ -1036,8 +1038,11 @@ func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Tim
 	result := &ChartAggregation{}
 	for rows.Next() {
 		var point ChartTimelinePoint
-		if err := rows.Scan(&point.Bucket, &point.Requests, &point.AvgLatency, &point.InputTokens,
-			&point.OutputTokens, &point.ReasoningTokens, &point.CachedTokens, &point.Errors4xx, &point.Errors5xx); err != nil {
+		if err := rows.Scan(
+			&point.Bucket, &point.Requests, &point.AvgLatency, &point.AvgFirstTokenMs,
+			&point.InputTokens, &point.OutputTokens, &point.ReasoningTokens, &point.CachedTokens,
+			&point.Errors4xx, &point.Errors5xx, &point.UserBilled, &point.AccountBilled,
+		); err != nil {
 			return nil, err
 		}
 		point.Bucket = strings.Replace(point.Bucket, " ", "T", 1) + "Z"
@@ -1051,7 +1056,13 @@ func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Tim
 		result.Timeline = []ChartTimelinePoint{}
 	}
 
-	modelQuery := `SELECT COALESCE(NULLIF(effective_model, ''), NULLIF(model, ''), 'unknown'), COUNT(*)
+	modelQuery := `SELECT
+		COALESCE(NULLIF(effective_model, ''), NULLIF(model, ''), 'unknown'),
+		COUNT(*),
+		COALESCE(SUM(input_tokens + output_tokens), 0),
+		COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 600 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(user_billed), 0),
+		COALESCE(AVG(CASE WHEN first_token_ms > 0 THEN first_token_ms END), 0)
 		FROM usage_logs WHERE created_at >= $1 AND created_at < $2 AND status_code <> 499
 		  AND TRIM(COALESCE(internal_reason, '')) = ''`
 	modelArgs := []interface{}{startArg, endArg}
@@ -1067,7 +1078,7 @@ func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Tim
 	defer modelRows.Close()
 	for modelRows.Next() {
 		var point ChartModelPoint
-		if err := modelRows.Scan(&point.Model, &point.Requests); err != nil {
+		if err := modelRows.Scan(&point.Model, &point.Requests, &point.Tokens, &point.ErrorCount, &point.UserBilled, &point.AvgFirstTokenMs); err != nil {
 			return nil, err
 		}
 		result.Models = append(result.Models, point)

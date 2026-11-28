@@ -3846,17 +3846,24 @@ export interface ChartTimelinePoint {
   bucket: string
   requests: number
   avg_latency: number
+  avg_first_token_ms?: number
   input_tokens: number
   output_tokens: number
   reasoning_tokens: number
   cached_tokens: number
   errors_4xx: number
   errors_5xx: number
+  user_billed?: number
+  account_billed?: number
 }
 
 export interface ChartModelPoint {
   model: string
   requests: number
+  tokens?: number
+  error_count?: number
+  user_billed?: number
+  avg_first_token_ms?: number
 }
 
 export interface ChartAggregation {

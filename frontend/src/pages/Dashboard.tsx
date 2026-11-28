@@ -1,32 +1,32 @@
-import type { ReactNode } from 'react'
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api } from '../api'
 import { getTimeRangeISO, getBucketConfig, type TimeRangeKey } from '../lib/timeRange'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
-import StatCard from '../components/StatCard'
-import UsageStatsSummary from '../components/UsageStatsSummary'
 import TimeRangeSelector from '../components/TimeRangeSelector'
 import ChannelFilter, { useUsageChannel, type UsageChannel } from '../components/ChannelFilter'
 import { useVisibleChannels } from '../visibleChannels'
-import ChannelLogo from '../components/ChannelLogo'
 import SystemHealthBar from '../components/SystemHealthBar'
+import DashboardKpiGrid from '../components/dashboard/DashboardKpiGrid'
+import DashboardPoolChannelCard, { type ChannelBreakdownEntry } from '../components/dashboard/DashboardPoolChannelCard'
+import DashboardRecentRequestsCard from '../components/dashboard/DashboardRecentRequestsCard'
 import type {
   AccountAnalysisResponse,
   StatsResponse,
   StatsChannelCounts,
   SystemSettings,
+  UsageLog,
   UsageStats,
   ChartAggregation,
 } from '../types'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { BarChart3, Users, CheckCircle, Gauge, XCircle, Activity } from 'lucide-react'
+import { BarChart3 } from 'lucide-react'
 import PoolRunwayCard from '../components/PoolRunwayCard'
 
-const DashboardUsageCharts = lazy(() => import('../components/DashboardUsageCharts'))
+const DashboardPrimaryTrendCard = lazy(() => import('../components/dashboard/DashboardPrimaryTrendCard'))
 
 const DASHBOARD_REFRESH_INTERVAL_MS = 15_000
 const DASHBOARD_POOL_REFRESH_INTERVAL_MS = 60_000
@@ -51,29 +51,30 @@ function persistPoolRunwayVisibility(visible: boolean) {
   }
 }
 
-function ChartsSkeleton() {
+function PrimaryTrendSkeleton() {
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-      {[0, 1, 2, 3].map((i) => (
-        <Card key={i} className="py-0">
-          <CardContent className="p-6">
-            <div className="mb-5 space-y-2">
-              <div className="h-4 w-32 rounded-md bg-muted animate-pulse" />
-              <div className="h-3 w-48 rounded-md bg-muted/60 animate-pulse" />
-            </div>
-            <div className="h-[280px] flex items-end gap-2 px-4 pb-4">
-              {[40, 65, 30, 80, 55, 70, 45, 60, 35, 75, 50, 68].map((h, j) => (
-                <div
-                  key={j}
-                  className="flex-1 rounded-t-md bg-muted/50 animate-pulse"
-                  style={{ height: `${h}%`, animationDelay: `${j * 80}ms` }}
-                />
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      ))}
-    </div>
+    <Card className="h-full border-border/75 py-0 shadow-2xs">
+      <CardContent className="p-5">
+        <div className="mb-4 space-y-2">
+          <div className="h-4 w-36 animate-pulse rounded-md bg-muted" />
+          <div className="h-3 w-52 animate-pulse rounded-md bg-muted/60" />
+        </div>
+        <div className="mb-4 grid grid-cols-3 gap-2">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="h-14 animate-pulse rounded-xl bg-muted/45" />
+          ))}
+        </div>
+        <div className="flex h-[270px] items-end gap-2 px-3 pb-4">
+          {[40, 65, 30, 80, 55, 70, 45, 60, 35, 75, 50, 68].map((h, j) => (
+            <div
+              key={j}
+              className="flex-1 animate-pulse rounded-t-md bg-muted/50"
+              style={{ height: `${h}%`, animationDelay: `${j * 70}ms` }}
+            />
+          ))}
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -88,9 +89,12 @@ export default function Dashboard() {
   const [chartRefreshedAt, setChartRefreshedAt] = useState<number | null>(null)
   const [chartLoading, setChartLoading] = useState(true)
   const [chartError, setChartError] = useState<string | null>(null)
+  const [recentLogs, setRecentLogs] = useState<UsageLog[]>([])
+  const [recentLogsLoading, setRecentLogsLoading] = useState(true)
   const chartAbort = useRef<AbortController | null>(null)
   const statsAbort = useRef<AbortController | null>(null)
   const poolAbort = useRef<AbortController | null>(null)
+  const recentLogsGenerationRef = useRef(0)
   const poolRequestGenerationRef = useRef(0)
   const timeRangeRef = useRef<TimeRangeKey>(timeRange)
   const usageStatsRangeInitialized = useRef(false)
@@ -224,11 +228,37 @@ export default function Dashboard() {
     }
   }, [timeRange, channel, t])
 
+  // 概览底部最近请求流（轻量 8 行，不阻塞核心统计）
+  const loadRecentLogs = useCallback(async () => {
+    const generation = ++recentLogsGenerationRef.current
+    setRecentLogsLoading(true)
+    try {
+      const { start, end } = getTimeRangeISO(timeRange)
+      const res = await api.getUsageLogsPaged({
+        start,
+        end,
+        channel: channel || undefined,
+        page: 1,
+        pageSize: 8,
+      })
+      if (generation === recentLogsGenerationRef.current) {
+        setRecentLogs(res.logs ?? [])
+      }
+    } catch {
+      // 静默容错，不影响概览主体
+    } finally {
+      if (generation === recentLogsGenerationRef.current) {
+        setRecentLogsLoading(false)
+      }
+    }
+  }, [timeRange, channel])
+
   useEffect(() => () => {
     chartAbort.current?.abort()
     statsAbort.current?.abort()
     poolAbort.current?.abort()
     poolRequestGenerationRef.current += 1
+    recentLogsGenerationRef.current += 1
   }, [])
 
   const handleChannelChange = useCallback((nextChannel: UsageChannel) => {
@@ -241,10 +271,11 @@ export default function Dashboard() {
     setChannel(nextChannel)
   }, [channel, setChannel, setData])
 
-  // 首次加载 + timeRange 变更时重新拉取图表数据
+  // 首次加载 + timeRange / channel 变更时重新拉取图表与最近请求
   useEffect(() => {
     void loadChartData()
-  }, [loadChartData])
+    void loadRecentLogs()
+  }, [loadChartData, loadRecentLogs])
 
   // 仅在 1h（实时）模式下启用自动刷新
   useEffect(() => {
@@ -254,15 +285,14 @@ export default function Dashboard() {
       if (document.visibilityState !== 'visible') return
       void reloadSilently()
       void loadChartData()
+      void loadRecentLogs()
     }, DASHBOARD_REFRESH_INTERVAL_MS)
 
     return () => window.clearInterval(timer)
-  }, [reloadSilently, timeRange, loadChartData])
+  }, [reloadSilently, timeRange, loadChartData, loadRecentLogs])
 
   const { stats, usageStats, settings, accountAnalysis } = data
   const showFullUsageNumbers = settings?.show_full_usage_numbers ?? false
-  // 渠道视图下账号池概览与统计卡切换为该渠道的计数；全部视图保持总量并展示分渠道徽标。
-  // 旧后端响应无 channels 字段时回退全量，有字段但该渠道无账号时如实显示 0。
   const emptyChannelCounts: StatsChannelCounts = {
     total: 0, available: 0, rate_limited: 0, error: 0, today_requests: 0,
   }
@@ -274,20 +304,43 @@ export default function Dashboard() {
   const rateLimited = effectiveCounts?.rate_limited ?? 0
   const errorCount = effectiveCounts?.error ?? 0
   const todayRequests = effectiveCounts?.today_requests ?? 0
-  const channelBreakdown = !channel && stats?.channels
+  const rangeLabel = t(`dashboard.timeRange${timeRange.toUpperCase()}`)
+
+  const channelBreakdown: ChannelBreakdownEntry[] = !channel && stats?.channels
     ? (['codex', 'grok', 'antigravity', 'claude', 'kiro', 'opencode'] as const)
         .filter((key) => isChannelVisible(key))
-        .map((key) => ({ key, counts: stats.channels?.[key] }))
-        .filter((item): item is { key: 'codex' | 'grok' | 'antigravity' | 'claude' | 'kiro' | 'opencode'; counts: StatsChannelCounts } =>
+        .map((key) => {
+          const channelLabel = key === 'claude'
+            ? 'Claude'
+            : key === 'grok'
+              ? 'Grok'
+              : key === 'antigravity'
+                ? 'Antigravity'
+                : key === 'kiro'
+                  ? 'Kiro'
+                  : key === 'opencode'
+                    ? 'OpenCode'
+                    : 'Codex'
+          return {
+            key,
+            label: channelLabel,
+            counts: stats.channels?.[key],
+            title: t('dashboard.heroChannelTitle', {
+              channel: key === 'claude' ? 'Claude' : channelLabel,
+              available: stats.channels?.[key]?.available ?? 0,
+              total: stats.channels?.[key]?.total ?? 0,
+              requests: stats.channels?.[key]?.today_requests ?? 0,
+            }),
+          }
+        })
+        .filter((item): item is ChannelBreakdownEntry & { title: string } =>
           Boolean(item.counts && item.counts.total > 0))
     : []
 
-  const icons: Record<string, ReactNode> = {
-    total: <Users className="size-[22px]" />,
-    available: <CheckCircle className="size-[22px]" />,
-    rateLimited: <Gauge className="size-[22px]" />,
-    error: <XCircle className="size-[22px]" />,
-    requests: <Activity className="size-[22px]" />,
+  const refreshAll = () => {
+    void reload()
+    void loadChartData()
+    void loadRecentLogs()
   }
 
   return (
@@ -295,7 +348,7 @@ export default function Dashboard() {
       variant="page"
       loading={loading}
       error={error}
-      onRetry={() => { void reload(); void loadChartData() }}
+      onRetry={refreshAll}
       loadingTitle={t('dashboard.loadingTitle')}
       loadingDescription={t('dashboard.loadingDesc')}
       errorTitle={t('dashboard.errorTitle')}
@@ -304,145 +357,98 @@ export default function Dashboard() {
         <PageHeader
           title={t('dashboard.title')}
           description={t('dashboard.description')}
-          onRefresh={() => { void reload(); void loadChartData() }}
-          titleAdornment={<ChannelFilter value={channel} onChange={handleChannelChange} />}
+          onRefresh={refreshAll}
+          className="mb-3 sm:mb-4"
           actions={
-            <div className="flex flex-wrap items-center gap-2">
-              {channel ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="shrink-0"
-                  aria-pressed={showPoolRunway}
-                  onClick={() => setShowPoolRunway((visible) => !visible)}
-                  title={
-                    showPoolRunway
-                      ? t('dashboard.hidePoolRunway')
-                      : t('dashboard.showPoolRunway')
-                  }
-                >
-                  <BarChart3 className="size-3.5" />
-                  <span className="hidden sm:inline">
-                    {showPoolRunway
-                      ? t('dashboard.hidePoolRunway')
-                      : t('dashboard.showPoolRunway')}
-                  </span>
-                </Button>
-              ) : (
-                <span className="max-w-44 text-center text-xs font-medium leading-tight text-muted-foreground">
-                  {t('dashboard.poolRunwaySingleChannelOnly')}
-                </span>
-              )}
-              <TimeRangeSelector
-                timeRange={timeRange}
-                onTimeRangeChange={setTimeRange}
-              />
-            </div>
+            <TimeRangeSelector
+              timeRange={timeRange}
+              onTimeRangeChange={setTimeRange}
+            />
           }
         />
 
-        {/* 渠道切换时整块内容淡入过渡（key 变化触发重播） */}
-        <div key={channel || 'all'} className="animate-channel-switch-in">
-        {/* Hero summary */}
-        <div className="relative mb-5 overflow-hidden rounded-xl border border-border/80 bg-gradient-to-r from-primary/5 via-card to-card p-5 shadow-2xs sm:mb-6 sm:p-6">
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top_left,color-mix(in_oklab,var(--color-primary)_10%,transparent),transparent_60%)]"
-          />
-          <div className="relative z-10 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="min-w-0 space-y-2">
-              <div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground/90">
-                {t('dashboard.heroLabel')}
-              </div>
-              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                <div className="text-3xl font-extrabold tabular-nums tracking-tight text-foreground sm:text-4xl">
-                  {available}
-                  <span className="text-lg font-bold text-muted-foreground/80 sm:text-xl">/{total}</span>
-                </div>
-                <div className="pb-0.5 text-sm font-semibold text-muted-foreground">
-                  {t('dashboard.heroAvailable')}
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-2 pt-1 text-xs text-muted-foreground">
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/12 px-3 py-1 text-xs font-bold text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-500/20">
-                  <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                  {total > 0
-                    ? t('dashboard.heroAvailability', {
-                        rate: Math.round((available / Math.max(total, 1)) * 100),
-                      })
-                    : t('dashboard.heroNoAccounts')}
+        {/* Unified Studio Filter Toolbar */}
+        <div className="mb-5 flex flex-wrap items-center justify-between gap-2.5">
+          <ChannelFilter value={channel} onChange={handleChannelChange} />
+          <div className="flex items-center gap-2">
+            {channel ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="shrink-0 rounded-lg"
+                aria-pressed={showPoolRunway}
+                onClick={() => setShowPoolRunway((visible) => !visible)}
+                title={
+                  showPoolRunway
+                    ? t('dashboard.hidePoolRunway')
+                    : t('dashboard.showPoolRunway')
+                }
+              >
+                <BarChart3 className="size-3.5" />
+                <span className="hidden sm:inline">
+                  {showPoolRunway
+                    ? t('dashboard.hidePoolRunway')
+                    : t('dashboard.showPoolRunway')}
                 </span>
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-muted/80 px-3 py-1 font-semibold text-foreground ring-1 ring-border/50">
-                  <Activity className="size-3 text-primary" />
-                  {t('dashboard.heroTodayRequests', { count: todayRequests })}
-                </span>
-                {channelBreakdown.map(({ key, counts }) => (
-                  <span
-                    key={key}
-                    className="inline-flex items-center gap-1.5 rounded-full bg-muted/80 px-3 py-1 font-semibold text-foreground ring-1 ring-border/50"
-                    title={t('dashboard.heroChannelTitle', {
-                      // Preserve the provider identity in the tooltip for every channel.
-                      channel: key === 'claude' ? 'Claude' : key === 'grok' ? 'Grok' : key === 'antigravity' ? 'Antigravity' : key === 'kiro' ? 'Kiro' : key === 'opencode' ? 'OpenCode' : 'Codex',
-                      available: counts.available,
-                      total: counts.total,
-                      requests: counts.today_requests,
-                    })}
-                  >
-                    <ChannelLogo channel={key} size={13} />
-                    <span className="tabular-nums">
-                      {counts.available}/{counts.total}
-                    </span>
-                    <span className="text-muted-foreground/60">·</span>
-                    <span className="tabular-nums">{counts.today_requests}</span>
-                  </span>
-                ))}
-                {errorCount > 0 ? (
-                  <span className="inline-flex items-center rounded-full bg-destructive/12 px-3 py-1 font-bold text-destructive ring-1 ring-destructive/20">
-                    {t('dashboard.heroErrors', { count: errorCount })}
-                  </span>
-                ) : null}
-                {rateLimited > 0 ? (
-                  <span className="inline-flex items-center rounded-full bg-amber-500/12 px-3 py-1 font-bold text-amber-700 dark:text-amber-300 ring-1 ring-amber-500/20">
-                    {t('dashboard.heroRateLimited', { count: rateLimited })}
-                  </span>
-                ) : null}
-              </div>
-            </div>
-            {total === 0 ? (
-              <div className="rounded-xl border border-dashed border-border bg-background/80 px-4 py-3.5 text-left text-sm text-muted-foreground lg:max-w-sm shadow-2xs">
-                <div className="font-bold text-foreground">{t('dashboard.heroEmptyTitle')}</div>
-                <p className="mt-1 leading-relaxed text-xs">{t('dashboard.heroEmptyDesc')}</p>
-              </div>
-            ) : null}
+              </Button>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 rounded-lg border border-border/60 bg-muted/35 px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground">
+                <BarChart3 className="size-3.5 opacity-65" />
+                {t('dashboard.poolRunwaySingleChannelOnly')}
+              </span>
+            )}
           </div>
         </div>
 
-        {/* Account status */}
-        <div className="mb-6 grid grid-cols-2 gap-2.5 sm:gap-4 md:grid-cols-3 xl:grid-cols-5">
-          <StatCard icon={icons.total} iconClass="blue" label={t('dashboard.totalAccounts')} value={total} />
-          <StatCard
-            icon={icons.available}
-            iconClass="green"
-            label={t('dashboard.available')}
-            value={available}
-          />
-          <StatCard
-            icon={icons.rateLimited}
-            iconClass="amber"
-            label={t('dashboard.rateLimited')}
-            value={rateLimited}
-          />
-          <StatCard icon={icons.error} iconClass="red" label={t('dashboard.error')} value={errorCount} />
-          <StatCard icon={icons.requests} iconClass="purple" label={t('dashboard.todayRequests')} value={todayRequests} className="col-span-2 min-[420px]:col-span-1 md:col-span-1" />
-        </div>
-
-        {/* Pool runway（可开关）+ system health */}
-        <div className="mb-6 space-y-3">
-          {showPoolRunway && accountAnalysis ? (
-            <PoolRunwayCard analysis={accountAnalysis} />
+        {/* 渠道切换时整块内容淡入过渡 */}
+        <div key={channel || 'all'} className="space-y-5 animate-channel-switch-in">
+          {/* Empty-pool onboarding callout */}
+          {total === 0 ? (
+            <div className="rounded-xl border border-dashed border-border bg-card/80 px-5 py-4 text-sm text-muted-foreground shadow-2xs">
+              <div className="font-semibold text-foreground">{t('dashboard.heroEmptyTitle')}</div>
+              <p className="mt-1 text-xs leading-relaxed">{t('dashboard.heroEmptyDesc')}</p>
+            </div>
           ) : null}
-          <SystemHealthBar chartData={chartData} timeRange={timeRange} loading={chartLoading} />
+
+          {/* Row 1: 4 high-density KPI cards with sparklines */}
+          <DashboardKpiGrid
+            total={total}
+            available={available}
+            rateLimited={rateLimited}
+            errorCount={errorCount}
+            todayRequests={todayRequests}
+            usageStats={usageStats}
+            chartData={chartData}
+            rangeLabel={rangeLabel}
+            showFullUsageNumbers={showFullUsageNumbers}
+          />
+
+          {/* Row 2: Asymmetric 2-column command center (62% interactive trend + 38% pool/channels/models) */}
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+            <Suspense fallback={<PrimaryTrendSkeleton />}>
+              <DashboardPrimaryTrendCard
+                chartData={chartData}
+                usageStats={usageStats}
+                timeRange={timeRange}
+                refreshedAt={chartRefreshedAt}
+                refreshIntervalMs={DASHBOARD_REFRESH_INTERVAL_MS}
+                loading={chartLoading}
+              />
+            </Suspense>
+
+            <DashboardPoolChannelCard
+              total={total}
+              available={available}
+              rateLimited={rateLimited}
+              errorCount={errorCount}
+              activeChannel={channel}
+              channelBreakdown={channelBreakdown}
+              models={chartData?.models ?? []}
+              onSelectChannel={handleChannelChange}
+            />
+          </div>
+
           {chartError ? (
             <div className="flex items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
               <span>{chartError}</span>
@@ -451,27 +457,17 @@ export default function Dashboard() {
               </Button>
             </div>
           ) : null}
-        </div>
 
-        {/* Usage stats */}
-        {usageStats && (
-          <div className="space-y-6">
-            <UsageStatsSummary
-              stats={usageStats}
-              rangeLabel={t(`dashboard.timeRange${timeRange.toUpperCase()}`)}
-              showFullUsageNumbers={showFullUsageNumbers}
-            />
-            <Suspense fallback={<ChartsSkeleton />}>
-              <DashboardUsageCharts
-                chartData={chartData}
-                refreshedAt={chartRefreshedAt}
-                refreshIntervalMs={DASHBOARD_REFRESH_INTERVAL_MS}
-                timeRange={timeRange}
-                loading={chartLoading}
-              />
-            </Suspense>
+          {/* Row 3: Pool runway forecast (when single channel) + System health timeline bar */}
+          <div className="space-y-3">
+            {showPoolRunway && accountAnalysis ? (
+              <PoolRunwayCard analysis={accountAnalysis} />
+            ) : null}
+            <SystemHealthBar chartData={chartData} timeRange={timeRange} loading={chartLoading} />
           </div>
-        )}
+
+          {/* Row 4: Live recent requests feed */}
+          <DashboardRecentRequestsCard logs={recentLogs} loading={recentLogsLoading} />
         </div>
       </>
     </StateShell>

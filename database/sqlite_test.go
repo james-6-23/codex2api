@@ -37,8 +37,8 @@ func TestChartAggregationUsesEpochBucketsForDailyRange(t *testing.T) {
 	start := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	for _, at := range []time.Time{start.Add(time.Hour), start.Add(23 * time.Hour), start.Add(25 * time.Hour)} {
 		if _, err := db.conn.ExecContext(ctx, `
-			INSERT INTO usage_logs (endpoint, model, effective_model, status_code, duration_ms, total_tokens, created_at)
-			VALUES ('/v1/responses', 'gpt-5.4', 'gpt-5.4', 200, 100, 10, $1)
+			INSERT INTO usage_logs (endpoint, model, effective_model, status_code, duration_ms, first_token_ms, input_tokens, output_tokens, total_tokens, user_billed, account_billed, created_at)
+			VALUES ('/v1/responses', 'gpt-5.4', 'gpt-5.4', 200, 100, 40, 6, 4, 10, 0.25, 0.15, $1)
 		`, sqliteTimeParam(at)); err != nil {
 			t.Fatalf("insert usage log: %v", err)
 		}
@@ -51,8 +51,11 @@ func TestChartAggregationUsesEpochBucketsForDailyRange(t *testing.T) {
 	if len(result.Timeline) != 2 || result.Timeline[0].Requests != 2 || result.Timeline[1].Requests != 1 {
 		t.Fatalf("timeline = %+v, want two daily buckets with 2/1 requests", result.Timeline)
 	}
-	if len(result.Models) != 1 || result.Models[0].Requests != 3 {
-		t.Fatalf("models = %+v, want one model with 3 requests", result.Models)
+	if result.Timeline[0].AvgFirstTokenMs != 40 || result.Timeline[0].UserBilled != 0.5 || result.Timeline[0].AccountBilled != 0.3 {
+		t.Fatalf("timeline[0] enriched metrics = %+v", result.Timeline[0])
+	}
+	if len(result.Models) != 1 || result.Models[0].Requests != 3 || result.Models[0].Tokens != 30 || result.Models[0].AvgFirstTokenMs != 40 {
+		t.Fatalf("models = %+v, want one model with 3 requests, 30 tokens, 40ms ttft", result.Models)
 	}
 }
 

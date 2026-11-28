@@ -6,7 +6,7 @@ import { getBucketConfig, type TimeRangeKey } from '../lib/timeRange'
 import type { ChartAggregation } from '../types'
 
 // SystemHealthBar 是仪表盘的系统级「健康状态」条：把所选时间跨度内服务端聚合的
-// 时间线（每个桶的请求数 / 4xx / 5xx）渲染成一排成功率色块 + 总体成功率。
+// 时间线（每个桶的请求数 / 4xx / 5xx）渲染成 Statuspage 风格竖条状态柱 + 总体成功率。
 // 复用 Dashboard 已加载的 chartData，无需额外请求；时间跨度跟随顶部选择器。
 
 interface Block {
@@ -19,8 +19,8 @@ interface Block {
 
 const COLOR_STOPS = [
   { r: 239, g: 68, b: 68 }, // #ef4444 红
-  { r: 250, g: 204, b: 21 }, // #facc15 金黄
-  { r: 34, g: 197, b: 94 }, // #22c55e 绿
+  { r: 245, g: 158, b: 11 }, // #f59e0b 琥珀
+  { r: 16, g: 185, b: 129 }, // #10b981 翠绿
 ] as const
 
 function rateToColor(rate: number): string {
@@ -64,16 +64,11 @@ export default function SystemHealthBar({ chartData, timeRange, loading = false 
   const [activeTooltip, setActiveTooltip] = useState<number | null>(null)
   const blocksRef = useRef<HTMLDivElement>(null)
 
-  // 后端图表聚合按桶 GROUP BY，只返回「有请求的桶」，空桶不在结果里。这里按所选
-  // 跨度重建固定数量的栅格（如 7d=28 格），把 timeline 的点按时间落入对应格子，
-  // 缺数据的格子显示为灰色 idle —— 否则 7 天只画了寥寥几格，看不出空窗。
   const { bucketMinutes, bucketCount } = getBucketConfig(timeRange)
   const bucketDurationMs = bucketMinutes * 60 * 1000
   const isDayBucket = bucketMinutes >= 1440
   const withDate = timeRange === '24h' || timeRange === '7d' || timeRange === '30d'
 
-  // 把栅格对齐到本地时钟边界（天桶→当天 00:00，小时桶→整点），而不是锚定在
-  // 「现在」这个零碎时刻，否则长跨度的桶起点会出现 03:16 这种怪值。
   const tzOffsetMs = new Date().getTimezoneOffset() * 60 * 1000
   const alignToBucket = (ms: number) =>
     Math.floor((ms - tzOffsetMs) / bucketDurationMs) * bucketDurationMs + tzOffsetMs
@@ -110,12 +105,12 @@ export default function SystemHealthBar({ chartData, timeRange, loading = false 
   const successRate = hasData ? (totalSuccess / grandTotal) * 100 : 100
 
   const rateClass = !hasData
-    ? 'bg-muted text-muted-foreground'
-    : successRate >= 90
-      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400'
-      : successRate >= 50
-        ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400'
-        : 'bg-red-100 text-red-600 dark:bg-red-950 dark:text-red-400'
+    ? 'border-border/70 bg-muted/70 text-muted-foreground'
+    : successRate >= 95
+      ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+      : successRate >= 80
+        ? 'border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+        : 'border-destructive/25 bg-destructive/10 text-destructive'
 
   useEffect(() => {
     if (activeTooltip === null) return
@@ -142,30 +137,31 @@ export default function SystemHealthBar({ chartData, timeRange, loading = false 
   }, [])
 
   const total = blocks.length
+  const startLabel = isDayBucket ? formatDate(windowStart) : formatClock(windowStart, withDate)
+  const endLabel = isDayBucket ? formatDate(lastBucketStart) : formatClock(lastBucketStart + bucketDurationMs, withDate)
 
   const renderTooltip = (block: Block, idx: number) => {
     const count = block.success + block.failure
     const posClass =
-      idx <= 2
+      idx <= 3
         ? 'left-0 translate-x-0'
-        : idx >= total - 3
+        : idx >= total - 4
           ? 'right-0 left-auto translate-x-0'
           : 'left-1/2 -translate-x-1/2'
-    // 天粒度（30d）只显示日期；否则显示「[日期] 起 – 止」时间段。
     const timeRangeLabel = isDayBucket
       ? formatDate(block.startTime)
       : `${formatClock(block.startTime, withDate)} – ${formatClock(block.endTime, false)}`
     return (
       <div
-        className={`pointer-events-none absolute bottom-[calc(100%+8px)] z-30 whitespace-nowrap rounded-md border bg-popover px-2.5 py-1.5 text-[11px] leading-snug text-popover-foreground shadow-md ${posClass}`}
+        className={`pointer-events-none absolute bottom-[calc(100%+10px)] z-30 whitespace-nowrap rounded-xl border border-border/80 bg-popover/95 px-3 py-2 text-[11px] leading-snug text-popover-foreground shadow-lg backdrop-blur-md ${posClass}`}
       >
-        <span className="mb-0.5 block text-muted-foreground">{timeRangeLabel}</span>
+        <span className="mb-1 block font-mono text-[10.5px] text-muted-foreground">{timeRangeLabel}</span>
         {count > 0 ? (
-          <span className="flex items-center gap-2">
-            <span className="text-emerald-600">
+          <span className="flex items-center gap-2.5 font-mono tabular-nums">
+            <span className="font-semibold text-emerald-600 dark:text-emerald-400">
               {t('dashboard.healthBarSuccessShort')} {block.success}
             </span>
-            <span className="text-red-500">
+            <span className="font-semibold text-rose-500">
               {t('dashboard.healthBarFailureShort')} {block.failure}
             </span>
             <span className="text-muted-foreground">({(block.rate * 100).toFixed(1)}%)</span>
@@ -178,49 +174,75 @@ export default function SystemHealthBar({ chartData, timeRange, loading = false 
   }
 
   return (
-    <Card className="py-0 border-border/70 bg-card shadow-2xs">
+    <Card className="rounded-2xl border-border/75 bg-card py-0 shadow-2xs">
       <CardContent className="p-4 sm:p-5">
-        <div className="mb-3.5 flex items-center justify-between gap-3">
+        <div className="mb-3.5 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <Activity className="size-4 text-primary" />
-            <h3 className="text-sm font-semibold text-foreground">
-              {t('dashboard.systemHealthTitle')}
-            </h3>
+            <span className="flex size-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <Activity className="size-3.5" />
+            </span>
+            <div>
+              <h3 className="text-sm font-semibold leading-tight text-foreground">
+                {t('dashboard.systemHealthTitle')}
+              </h3>
+            </div>
           </div>
-          <span
-            className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-bold tabular-nums shadow-2xs ${rateClass}`}
-          >
-            {hasData ? formatSuccessRate(successRate) : '--'}
-          </span>
+
+          <div className="flex items-center gap-3">
+            <div className="hidden items-center gap-3 text-[11px] text-muted-foreground sm:flex">
+              <span className="inline-flex items-center gap-1">
+                <span className="size-2 rounded-xs bg-emerald-500" />
+                {t('dashboard.healthBarSuccessShort')}
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="size-2 rounded-xs bg-amber-500" />
+                {t('dashboard.rateLimited')}
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="size-2 rounded-xs bg-rose-500" />
+                {t('dashboard.healthBarFailureShort')}
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="size-2 rounded-xs bg-muted-foreground/25" />
+                {t('dashboard.healthBarNoRequests')}
+              </span>
+            </div>
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-sans text-xs font-semibold tabular-nums ${rateClass}`}
+            >
+              <span className={`size-1.5 rounded-full ${!hasData ? 'bg-muted-foreground/50' : successRate >= 95 ? 'bg-emerald-500' : successRate >= 80 ? 'bg-amber-500' : 'bg-rose-500'}`} />
+              {hasData ? formatSuccessRate(successRate) : '--'}
+            </span>
+          </div>
         </div>
 
         {loading && !hasData ? (
-          <div className="flex gap-1">
+          <div className="flex gap-[3px]">
             {Array.from({ length: bucketCount }).map((_, i) => (
               <div
                 key={i}
-                className="h-3 flex-1 animate-pulse rounded-full bg-muted/60"
-                style={{ animationDelay: `${i * 40}ms` }}
+                className="h-7 flex-1 animate-pulse rounded-[4px] bg-muted/60"
+                style={{ animationDelay: `${i * 25}ms` }}
               />
             ))}
           </div>
         ) : (
-          <div className="relative flex gap-1 items-center" ref={blocksRef}>
+          <div className="relative flex items-center gap-[3px]" ref={blocksRef}>
             {blocks.map((block, idx) => {
               const isIdle = block.rate === -1
               const isActive = activeTooltip === idx
               return (
                 <div
                   key={idx}
-                  className="group relative min-w-[3px] flex-1 cursor-pointer py-1"
+                  className="group relative min-w-[3px] flex-1 cursor-pointer py-0.5"
                   onPointerEnter={(e) => handlePointerEnter(e, idx)}
                   onPointerLeave={handlePointerLeave}
                   onPointerDown={(e) => handlePointerDown(e, idx)}
                 >
                   <div
-                    className={`h-3 w-full rounded-full transition-all duration-150 group-hover:scale-y-125 ${
-                      isIdle ? 'bg-muted/70' : ''
-                    } ${isActive ? 'scale-y-125 opacity-90 ring-2 ring-primary/40' : ''}`}
+                    className={`h-7 w-full rounded-[4px] transition-all duration-150 group-hover:scale-y-110 group-hover:brightness-105 ${
+                      isIdle ? 'bg-muted/70 hover:bg-muted' : ''
+                    } ${isActive ? 'scale-y-110 ring-2 ring-primary/40 ring-offset-1 ring-offset-card' : ''}`}
                     style={isIdle ? undefined : { backgroundColor: rateToColor(block.rate) }}
                   />
                   {isActive && renderTooltip(block, idx)}
@@ -229,6 +251,16 @@ export default function SystemHealthBar({ chartData, timeRange, loading = false 
             })}
           </div>
         )}
+
+        <div className="mt-2 flex items-center justify-between font-sans text-[11px] text-muted-foreground/80 tabular-nums">
+          <span>{startLabel}</span>
+          <span>
+            {hasData
+              ? `${totalSuccess.toLocaleString()} ${t('dashboard.healthBarSuccessShort')} · ${totalFailure.toLocaleString()} ${t('dashboard.healthBarFailureShort')}`
+              : t('dashboard.healthBarNoRequests')}
+          </span>
+          <span>{endLabel}</span>
+        </div>
       </CardContent>
     </Card>
   )

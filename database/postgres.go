@@ -5874,18 +5874,25 @@ type ChartTimelinePoint struct {
 	Bucket          string  `json:"bucket"`
 	Requests        int64   `json:"requests"`
 	AvgLatency      float64 `json:"avg_latency"`
+	AvgFirstTokenMs float64 `json:"avg_first_token_ms"`
 	InputTokens     int64   `json:"input_tokens"`
 	OutputTokens    int64   `json:"output_tokens"`
 	ReasoningTokens int64   `json:"reasoning_tokens"`
 	CachedTokens    int64   `json:"cached_tokens"`
 	Errors4xx       int64   `json:"errors_4xx"`
 	Errors5xx       int64   `json:"errors_5xx"`
+	UserBilled      float64 `json:"user_billed"`
+	AccountBilled   float64 `json:"account_billed"`
 }
 
 // ChartModelPoint 模型排行聚合点
 type ChartModelPoint struct {
-	Model    string `json:"model"`
-	Requests int64  `json:"requests"`
+	Model           string  `json:"model"`
+	Requests        int64   `json:"requests"`
+	Tokens          int64   `json:"tokens,omitempty"`
+	ErrorCount      int64   `json:"error_count,omitempty"`
+	UserBilled      float64 `json:"user_billed,omitempty"`
+	AvgFirstTokenMs float64 `json:"avg_first_token_ms,omitempty"`
 }
 
 // ChartAggregation 仪表盘图表聚合结果
@@ -5994,7 +6001,8 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 		SELECT
 			TO_TIMESTAMP(FLOOR(EXTRACT(EPOCH FROM created_at) / ($3 * 60)) * ($3 * 60)) AS bucket,
 			COALESCE(NULLIF(effective_model, ''), NULLIF(model, ''), 'unknown') AS model_name,
-			duration_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, status_code
+			duration_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, status_code,
+			user_billed, account_billed
 		FROM usage_logs
 		WHERE created_at >= $1 AND created_at < $2
 		  AND status_code <> 499
@@ -6008,12 +6016,15 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 		END AS row_key,
 		COUNT(*) AS requests,
 		COALESCE(AVG(duration_ms), 0) AS avg_latency,
+		COALESCE(AVG(CASE WHEN first_token_ms > 0 THEN first_token_ms END), 0) AS avg_first_token_ms,
 		COALESCE(SUM(input_tokens), 0) AS input_tokens,
 		COALESCE(SUM(output_tokens), 0) AS output_tokens,
 		COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
 		COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
 		COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END), 0) AS errors_4xx,
-		COALESCE(SUM(CASE WHEN status_code >= 500 AND status_code < 600 THEN 1 ELSE 0 END), 0) AS errors_5xx
+		COALESCE(SUM(CASE WHEN status_code >= 500 AND status_code < 600 THEN 1 ELSE 0 END), 0) AS errors_5xx,
+		COALESCE(SUM(user_billed), 0) AS user_billed,
+		COALESCE(SUM(account_billed), 0) AS account_billed
 	FROM filtered
 	GROUP BY GROUPING SETS ((bucket), (model_name))
 	ORDER BY GROUPING(bucket), bucket, requests DESC, row_key`
@@ -6031,19 +6042,31 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 	for rows.Next() {
 		var rowKind, rowKey string
 		var requests int64
-		var avgLatency float64
+		var avgLatency, avgFirstTokenMs, userBilled, accountBilled float64
 		var inputTokens, outputTokens, reasoningTokens, cachedTokens, errors4xx, errors5xx int64
-		if err := rows.Scan(&rowKind, &rowKey, &requests, &avgLatency, &inputTokens, &outputTokens, &reasoningTokens, &cachedTokens, &errors4xx, &errors5xx); err != nil {
+		if err := rows.Scan(
+			&rowKind, &rowKey, &requests, &avgLatency, &avgFirstTokenMs,
+			&inputTokens, &outputTokens, &reasoningTokens, &cachedTokens,
+			&errors4xx, &errors5xx, &userBilled, &accountBilled,
+		); err != nil {
 			return nil, err
 		}
 		if rowKind == "model" {
-			result.Models = append(result.Models, ChartModelPoint{Model: rowKey, Requests: requests})
+			result.Models = append(result.Models, ChartModelPoint{
+				Model:           rowKey,
+				Requests:        requests,
+				Tokens:          inputTokens + outputTokens,
+				ErrorCount:      errors4xx + errors5xx,
+				UserBilled:      userBilled,
+				AvgFirstTokenMs: avgFirstTokenMs,
+			})
 			continue
 		}
 		result.Timeline = append(result.Timeline, ChartTimelinePoint{
-			Bucket: rowKey, Requests: requests, AvgLatency: avgLatency,
+			Bucket: rowKey, Requests: requests, AvgLatency: avgLatency, AvgFirstTokenMs: avgFirstTokenMs,
 			InputTokens: inputTokens, OutputTokens: outputTokens, ReasoningTokens: reasoningTokens,
 			CachedTokens: cachedTokens, Errors4xx: errors4xx, Errors5xx: errors5xx,
+			UserBilled: userBilled, AccountBilled: accountBilled,
 		})
 	}
 	if err := rows.Err(); err != nil {
