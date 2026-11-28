@@ -2056,6 +2056,7 @@ export interface OpsOverviewResponse {
     num_gc?: number
   }
   response_cache?: {
+    backend_write_failures?: number
     effective_config: {
       generation: number
       local_max_bytes: number
@@ -2091,6 +2092,48 @@ export interface OpsOverviewResponse {
     chain_owners?: number
     last_config_sync_at: ISODateString | ''
     last_config_sync_error: string
+  }
+  response_cache_writer?: {
+    active_writes: number
+    waiting_writes: number
+    inflight_logical_bytes: number
+    waiting_logical_bytes: number
+    max_active_writes: number
+    max_waiting_writes: number
+    max_logical_bytes: number
+    high_water_active_writes: number
+    high_water_logical_bytes: number
+    queue_rejections: number
+    wait_timeouts: number
+    oversize_active: boolean
+  }
+  request_memory?: {
+    limit_bytes: number
+    used_bytes: number
+    high_water_bytes: number
+    active_reservations: number
+    rejections: number
+  }
+  api_key_auth_cache?: {
+    enabled: boolean
+    shared: boolean
+    entries: number
+    bytes: number
+    max_entries: number
+    max_bytes: number
+    generation: number
+    revision_max_age_ms: number
+    local_hits: number
+    remote_hits: number
+    misses: number
+    negative_hits: number
+    db_loads: number
+    quota_reads: number
+    revision_checks: number
+    invalidations: number
+    errors: number
+    evictions: number
+    oversize_bypasses: number
   }
   runtime: {
     goroutines: number
@@ -2154,6 +2197,10 @@ export interface OpsOverviewResponse {
     stale_conns: number
     pool_size: number
     usage_percent: number
+    wait_count?: number
+    wait_duration_ns?: number
+    timeouts?: number
+    pending_requests?: number
   }
   traffic: {
     qps: number

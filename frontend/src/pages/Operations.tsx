@@ -1,25 +1,26 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
-  Activity,
-  AlertTriangle,
-  BarChart3,
+  ArrowUpRight,
   Clock3,
-  Cpu,
   Database,
-  HardDrive,
-  RefreshCw,
-  Server,
-  Users,
-  Zap,
   Gauge,
+  HardDrive,
   Layers,
+  Pause,
+  Play,
+  RefreshCw,
+  Workflow,
+  Zap,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { api } from '../api'
 import PageHeader from '../components/PageHeader'
-import { StatTile } from '../components/StatTile'
 import OpsTabs from '../components/OpsTabs'
 import StateShell from '../components/StateShell'
+import OpsHealthHero, { type OpsSamplePoint } from '../components/ops/OpsHealthHero'
+import OpsInfraDeck from '../components/ops/OpsInfraDeck'
+import OpsGuardsDeck from '../components/ops/OpsGuardsDeck'
 import { useDataLoader } from '../hooks/useDataLoader'
 import type { OpsOverviewResponse } from '../types'
 import { cacheUtilizationPercent, formatIECBytes } from '../lib/responseCacheMetrics'
@@ -29,6 +30,8 @@ import { cn } from '@/lib/utils'
 import { getTimezone } from '../utils/time'
 
 type MetricTone = 'normal' | 'warning' | 'danger' | 'info'
+
+const MAX_LIVE_SAMPLES = 20
 
 export default function Operations() {
   const { t } = useTranslation()
@@ -40,6 +43,26 @@ export default function Operations() {
   })
 
   const [countdown, setCountdown] = useState(15)
+  const [autoRefresh, setAutoRefresh] = useState(true)
+  const [samples, setSamples] = useState<OpsSamplePoint[]>([])
+
+  // 记录每次采样到内存环形窗口，用于 CPU / 内存 / QPS 实时微趋势曲线
+  useEffect(() => {
+    if (!overview?.updated_at) return
+    const ts = Date.parse(overview.updated_at) || Date.now()
+    setSamples((prev) => {
+      if (prev.length > 0 && prev[prev.length - 1].ts === ts) return prev
+      const next: OpsSamplePoint = {
+        ts,
+        cpu: overview.cpu.percent,
+        memory: overview.memory.percent,
+        qps: overview.traffic.qps,
+        active: overview.requests.active,
+        goroutines: overview.runtime.goroutines,
+      }
+      return [...prev.slice(-(MAX_LIVE_SAMPLES - 1)), next]
+    })
+  }, [overview])
 
   const triggerManualReload = useCallback(async () => {
     setCountdown(15)
@@ -47,7 +70,9 @@ export default function Operations() {
   }, [reload])
 
   useEffect(() => {
+    if (!autoRefresh) return
     const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return
       setCountdown((prev) => {
         if (prev <= 1) {
           void reloadSilently()
@@ -58,7 +83,7 @@ export default function Operations() {
     }, 1000)
 
     return () => window.clearInterval(timer)
-  }, [reloadSilently])
+  }, [autoRefresh, reloadSilently])
 
   const updatedLabel = overview?.updated_at ? formatTimeLabel(overview.updated_at) : '--:--:--'
 
@@ -77,18 +102,45 @@ export default function Operations() {
           title={t('ops.title')}
           description={t('ops.description')}
           actions={
-            <div className="flex items-center gap-3 max-sm:w-full max-sm:flex-col max-sm:items-stretch">
-              <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/40 px-2.5 py-1.5 text-xs text-muted-foreground max-sm:justify-center">
+            <div className="flex flex-wrap items-center gap-2 max-sm:w-full max-sm:justify-between">
+              <button
+                type="button"
+                onClick={() => setAutoRefresh((v) => !v)}
+                title={autoRefresh ? t('ops.pauseAutoRefresh') : t('ops.resumeAutoRefresh')}
+                className={cn(
+                  'inline-flex h-8 items-center gap-2 rounded-lg border px-2.5 text-xs font-medium transition-colors',
+                  autoRefresh
+                    ? 'border-emerald-500/25 bg-emerald-500/[0.08] text-emerald-700 hover:bg-emerald-500/15 dark:text-emerald-300'
+                    : 'border-border/75 bg-muted/45 text-muted-foreground hover:bg-muted',
+                )}
+              >
                 <span className="relative flex size-2">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                  <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+                  {autoRefresh ? (
+                    <>
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                      <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+                    </>
+                  ) : (
+                    <span className="relative inline-flex size-2 rounded-full bg-muted-foreground/60" />
+                  )}
                 </span>
-                <span>{t('ops.autoRefreshing', { sec: countdown })}</span>
-              </div>
-              <span className="text-xs text-muted-foreground max-sm:text-center">
+                <span className="tabular-nums">
+                  {autoRefresh ? t('ops.autoRefreshing', { sec: countdown }) : t('ops.autoRefreshPaused')}
+                </span>
+                {autoRefresh ? <Pause className="size-3 opacity-70" /> : <Play className="size-3 opacity-70" />}
+              </button>
+
+              <span className="hidden rounded-lg border border-border/60 bg-muted/30 px-2.5 py-1.5 font-sans text-xs text-muted-foreground tabular-nums md:inline-flex">
                 {t('ops.lastUpdated', { time: updatedLabel })}
               </span>
-              <Button variant="outline" size="sm" onClick={() => void triggerManualReload()} disabled={loading}>
+
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 rounded-lg"
+                onClick={() => void triggerManualReload()}
+                disabled={loading}
+              >
                 <RefreshCw className={cn('size-3.5', loading && 'animate-spin')} />
                 {loading ? t('ops.refreshing') : t('common.refresh')}
               </Button>
@@ -98,248 +150,183 @@ export default function Operations() {
         <OpsTabs />
 
         {overview ? (
-          <>
-            <div className="mb-6 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-4 sm:gap-4">
-              <StatTile
-                label={t('ops.uptime')}
-                value={formatUptime(overview.uptime_seconds, t)}
-                icon={<Clock3 className="size-4" />}
-                tone="neutral"
-              />
-              <StatTile
-                label={t('ops.accountPool')}
-                value={`${overview.runtime.available_accounts} / ${overview.runtime.total_accounts}`}
-                icon={<Users className="size-4" />}
-                tone="info"
-              />
-              <StatTile
-                label={t('ops.todayRequests')}
-                value={formatNumber(overview.traffic.today_requests)}
-                icon={<BarChart3 className="size-4" />}
-                tone="info"
-              />
-              <StatTile
-                label={t('ops.todayErrorRate')}
-                value={`${overview.traffic.error_rate.toFixed(1)}%`}
-                icon={<AlertTriangle className="size-4" />}
-                tone={overview.traffic.error_rate >= 5 ? 'danger' : overview.traffic.error_rate > 0 ? 'warning' : 'success'}
-              />
-            </div>
+          <div className="space-y-5">
+            {/* Band 1: System Health Verdict + 4 Studio Hero KPIs */}
+            <OpsHealthHero overview={overview} samples={samples} />
 
-            <div className="space-y-6">
-              {/* 分组 1：基础硬件与依赖 */}
-              <div className="space-y-3">
-                <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
-                  <Cpu className="size-4 text-primary" />
-                  <span>{t('ops.sections.infrastructure')}</span>
-                </div>
-                <div className="grid grid-cols-1 gap-4 min-[420px]:grid-cols-2 lg:grid-cols-4">
-                  <OpsMetricCard
-                    label={t('ops.cpu')}
-                    value={`${overview.cpu.percent.toFixed(1)}%`}
-                    sub={t('ops.cpuCores', { count: overview.cpu.cores })}
-                    icon={<Cpu className="size-5" />}
-                    tone={getPercentTone(overview.cpu.percent, 70, 90)}
-                    progressPercent={overview.cpu.percent}
-                    t={t}
-                  />
-                  <OpsMetricCard
-                    label={t('ops.memory')}
-                    value={`${overview.memory.percent.toFixed(1)}%`}
-                    sub={
-                      <dl className="grid grid-cols-2 gap-x-2 gap-y-1 text-xs">
-                        <MemoryDetail
-                          label={t('ops.memorySystem')}
-                          value={`${formatIECBytes(overview.memory.used_bytes)} / ${formatIECBytes(overview.memory.total_bytes)}`}
-                        />
-                        <MemoryDetail
-                          label={t('ops.memoryRss')}
-                          value={formatIECBytes(overview.memory.process_bytes)}
-                        />
-                        {typeof overview.memory.heap_alloc_bytes === 'number' ? (
-                          <>
-                            <MemoryDetail
-                              label={t('ops.heapAllocated')}
-                              value={formatIECBytes(overview.memory.heap_alloc_bytes)}
-                            />
-                            <MemoryDetail
-                              label={t('ops.heapInUse')}
-                              value={formatIECBytes(overview.memory.heap_inuse_bytes ?? 0)}
-                            />
-                            <MemoryDetail
-                              label={t('ops.heapReleased')}
-                              value={formatIECBytes(overview.memory.heap_released_bytes ?? 0)}
-                            />
-                            <MemoryDetail
-                              label={t('ops.gcRuns')}
-                              value={formatNumber(overview.memory.num_gc ?? 0)}
-                            />
-                          </>
+            {/* Band 2: Compute & Go Runtime (left) + Storage Pools & Rate Limit (right) */}
+            <OpsInfraDeck overview={overview} samples={samples} />
+
+            {/* Band 3: Guards & Internal Caches (Auth Cache, Request Memory, Async Writer) */}
+            <OpsGuardsDeck overview={overview} />
+
+            {/* Band 4: Unified Scheduler & Routing Panel */}
+            {overview.scheduler ? (
+              <Card className="rounded-2xl border-border/75 bg-card py-0 shadow-2xs">
+                <CardContent className="p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="flex items-center gap-2 text-[15px] font-semibold tracking-tight text-foreground">
+                          <Workflow className="size-4 text-primary" />
+                          {t('ops.schedulerPanel.title')}
+                        </h3>
+                        {overview.scheduler.snapshot_generation > 0 ? (
+                          <span className="rounded-md bg-muted/60 px-2 py-0.5 font-sans text-[11px] font-medium text-muted-foreground tabular-nums">
+                            {t('ops.schedulerPanel.snapshotMeta', {
+                              gen: overview.scheduler.snapshot_generation,
+                              count: overview.scheduler.snapshot_account_count,
+                            })}
+                          </span>
                         ) : null}
-                      </dl>
-                    }
-                    icon={<HardDrive className="size-5" />}
-                    tone={getPercentTone(overview.memory.percent, 75, 90)}
-                    progressPercent={overview.memory.percent}
-                    secondaryProgress={
-                      typeof overview.memory.container_percent === 'number'
-                        ? {
-                            label:
-                              overview.memory.container_source === 'cgroup'
-                                ? t('ops.memoryContainer')
-                                : t('ops.memoryProcess'),
-                            value: `${formatIECBytes(overview.memory.container_used_bytes ?? 0)} / ${formatIECBytes(
-                              overview.memory.container_limit_bytes || overview.memory.total_bytes,
-                            )} (${overview.memory.container_percent.toFixed(1)}%)`,
-                            percent: overview.memory.container_percent,
-                            tone: getPercentTone(overview.memory.container_percent, 75, 90),
-                          }
-                        : undefined
-                    }
-                    t={t}
-                  />
-                  <OpsMetricCard
-                    label={overview.database_label || t('ops.postgres')}
-                    value={`${overview.postgres.usage_percent.toFixed(1)}%`}
-                    sub={t('ops.pgConn', { open: overview.postgres.open, max: overview.postgres.max_open || '∞' })}
-                    icon={<Database className="size-5" />}
-                    tone={getDatabaseTone(overview)}
-                    progressPercent={overview.database_driver === 'sqlite' ? undefined : overview.postgres.usage_percent}
-                    t={t}
-                  />
-                  <OpsMetricCard
-                    label={overview.cache_label || t('ops.redis')}
-                    value={`${overview.redis.usage_percent.toFixed(1)}%`}
-                    sub={t('ops.redisConn', { open: overview.redis.total_conns, max: overview.redis.pool_size || '-' })}
-                    icon={<Server className="size-5" />}
-                    tone={getCacheTone(overview)}
-                    progressPercent={overview.cache_driver === 'memory' ? undefined : overview.redis.usage_percent}
-                    t={t}
-                  />
-                </div>
-              </div>
+                      </div>
+                      <p className="mt-0.5 text-xs text-muted-foreground">{t('ops.schedulerPanel.desc')}</p>
+                    </div>
+                    <Link
+                      to="/ops/scheduler"
+                      className="inline-flex items-center gap-1 rounded-lg border border-border/70 bg-muted/35 px-2.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted/70"
+                    >
+                      {t('ops.schedulerPanel.openBoard')}
+                      <ArrowUpRight className="size-3.5 text-muted-foreground" />
+                    </Link>
+                  </div>
 
-              {/* 分组 2：流量与吞吐表现 */}
-              <div className="space-y-3">
-                <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
-                  <Gauge className="size-4 text-primary" />
-                  <span>{t('ops.sections.traffic')}</span>
-                </div>
-                <div className="grid grid-cols-1 gap-4 min-[420px]:grid-cols-2 lg:grid-cols-4">
-                  <OpsMetricCard
-                    label={t('ops.qps')}
-                    value={overview.traffic.qps.toFixed(1)}
-                    sub={t('ops.qpsPeak', { value: overview.traffic.qps_peak.toFixed(1) })}
-                    icon={<BarChart3 className="size-5" />}
-                    tone="info"
-                    t={t}
-                  />
-                  <OpsMetricCard
-                    label={t('ops.tps')}
-                    value={formatNumber(Math.round(overview.traffic.tps))}
-                    sub={t('ops.tpsPeak', { value: formatNumber(Math.round(overview.traffic.tps_peak)) })}
-                    icon={<Zap className="size-5" />}
-                    tone="info"
-                    t={t}
-                  />
-                  <OpsMetricCard
-                    label={t('ops.rpm')}
-                    value={formatNumber(Math.round(overview.traffic.rpm))}
-                    sub={overview.traffic.rpm_limit > 0 ? t('ops.rpmLimit', { value: formatNumber(overview.traffic.rpm_limit) }) : t('ops.rpmNoLimit')}
-                    icon={<Clock3 className="size-5" />}
-                    tone={overview.traffic.rpm_limit > 0 && overview.traffic.rpm >= overview.traffic.rpm_limit * 0.8 ? 'warning' : 'normal'}
-                    progressPercent={overview.traffic.rpm_limit > 0 ? (overview.traffic.rpm / overview.traffic.rpm_limit) * 100 : undefined}
-                    t={t}
-                  />
-                  <OpsMetricCard
-                    label={t('ops.tpm')}
-                    value={formatNumber(Math.round(overview.traffic.tpm))}
-                    sub={t('ops.tpmToday', { value: formatNumber(overview.traffic.today_tokens) })}
-                    icon={<AlertTriangle className="size-5" />}
-                    tone={overview.traffic.error_rate >= 5 ? 'warning' : 'normal'}
-                    t={t}
-                  />
-                </div>
-              </div>
-
-              {/* 分组 3：并发与运行时负载 */}
-              <div className="space-y-3">
-                <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
-                  <Layers className="size-4 text-primary" />
-                  <span>{t('ops.sections.concurrency')}</span>
-                </div>
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <OpsMetricCard
-                    label={t('ops.activeRequests')}
-                    value={formatNumber(overview.requests.active)}
-                    sub={t('ops.totalRequestsAccum', { count: formatNumber(overview.requests.total) })}
-                    icon={<Activity className="size-5" />}
-                    tone={overview.requests.active >= Math.max(50, overview.runtime.total_accounts * 0.5) ? 'warning' : 'normal'}
-                    t={t}
-                  />
-                  <OpsMetricCard
-                    label={t('ops.goroutines')}
-                    value={formatNumber(overview.runtime.goroutines)}
-                    sub={t('ops.goroutinesPool', { available: overview.runtime.available_accounts, total: overview.runtime.total_accounts })}
-                    icon={<Users className="size-5" />}
-                    tone={overview.runtime.goroutines >= Math.max(1000, overview.runtime.total_accounts * 3) ? 'danger' : overview.runtime.goroutines >= Math.max(500, overview.runtime.total_accounts * 1.5) ? 'warning' : 'normal'}
-                    t={t}
-                  />
-                </div>
-                {overview.scheduler ? (
-                  <div className="grid grid-cols-1 gap-4 min-[420px]:grid-cols-2 lg:grid-cols-5">
-                    <OpsMetricCard
+                  <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                    <SchedulerTile
                       label={t('ops.schedulerEngine')}
                       value={formatSchedulerEngine(overview.scheduler.engine, t)}
-                      sub={overview.scheduler.engine === 'shadow'
-                        ? t('ops.schedulerShadowChecks', { checks: formatNumber(overview.scheduler.shadow_checks), mismatches: formatNumber(overview.scheduler.shadow_mismatches) })
-                        : t('ops.schedulerSelections', { count: formatNumber(overview.scheduler.selection_total) })}
-                      icon={<Gauge className="size-5" />}
-                      tone={overview.scheduler.engine === 'indexed' ? 'normal' : overview.scheduler.engine === 'shadow' ? 'info' : 'warning'}
-                      t={t}
+                      sub={
+                        overview.scheduler.engine === 'shadow'
+                          ? t('ops.schedulerShadowChecks', {
+                              checks: formatNumber(overview.scheduler.shadow_checks),
+                              mismatches: formatNumber(overview.scheduler.shadow_mismatches),
+                            })
+                          : t('ops.schedulerSelections', {
+                              count: formatNumber(overview.scheduler.selection_total),
+                            })
+                      }
+                      icon={<Gauge className="size-3.5" />}
+                      tone={
+                        overview.scheduler.engine === 'indexed'
+                          ? 'normal'
+                          : overview.scheduler.engine === 'shadow'
+                            ? 'info'
+                            : 'warning'
+                      }
                     />
-                    <OpsMetricCard
+                    <SchedulerTile
                       label={t('ops.schedulerFastHit')}
                       value={`${schedulerFastHitRate(overview.scheduler).toFixed(1)}%`}
-                      sub={t('ops.schedulerSlowScans', { count: formatNumber(overview.scheduler.slow_scanned_accounts) })}
-                      icon={<Zap className="size-5" />}
-                      tone={overview.scheduler.slow_scanned_accounts > 0 && overview.scheduler.engine === 'indexed' ? 'warning' : 'normal'}
-                      t={t}
+                      sub={t('ops.schedulerSlowScans', {
+                        count: formatNumber(overview.scheduler.slow_scanned_accounts),
+                      })}
+                      icon={<Zap className="size-3.5" />}
+                      tone={
+                        overview.scheduler.slow_scanned_accounts > 0 && overview.scheduler.engine === 'indexed'
+                          ? 'warning'
+                          : 'normal'
+                      }
                     />
-                    <OpsMetricCard
+                    <SchedulerTile
                       label={t('ops.schedulerWaiters')}
                       value={formatNumber(overview.scheduler.waiters)}
-                      sub={t('ops.schedulerWakeups', { count: formatNumber(overview.scheduler.wait_wakeups) })}
-                      icon={<Clock3 className="size-5" />}
-                      tone={overview.scheduler.waiters > Math.max(100, overview.runtime.total_accounts) ? 'warning' : 'normal'}
-                      t={t}
+                      sub={t('ops.schedulerWakeups', {
+                        count: formatNumber(overview.scheduler.wait_wakeups),
+                      })}
+                      icon={<Clock3 className="size-3.5" />}
+                      tone={
+                        overview.scheduler.waiters > Math.max(100, overview.runtime.total_accounts)
+                          ? 'warning'
+                          : 'normal'
+                      }
                     />
-                    <OpsMetricCard
+                    <SchedulerTile
                       label={t('ops.schedulerRoutingCache')}
                       value={formatNumber(overview.scheduler.routing_cache_entries)}
-                      sub={t('ops.schedulerRoutingCacheStats', { hits: formatNumber(overview.scheduler.routing_cache_hits), accounts: formatNumber(overview.scheduler.routing_cache_accounts) })}
-                      icon={<Layers className="size-5" />}
+                      sub={t('ops.schedulerRoutingCacheStats', {
+                        hits: formatNumber(overview.scheduler.routing_cache_hits),
+                        accounts: formatNumber(overview.scheduler.routing_cache_accounts),
+                      })}
+                      icon={<Layers className="size-3.5" />}
                       tone={overview.scheduler.routing_cache_evictions > 0 ? 'info' : 'normal'}
-                      t={t}
                     />
-                    <OpsMetricCard
+                    <SchedulerTile
                       label={t('ops.schedulerOutbox')}
                       value={formatNumber(overview.scheduler.outbox_backlog)}
-                      sub={t('ops.schedulerOutboxLag', { ms: formatNumber(overview.scheduler.outbox_lag_ms), errors: formatNumber(overview.scheduler.outbox_errors) })}
-                      icon={<Database className="size-5" />}
-                      tone={overview.scheduler.outbox_errors > 0 ? 'danger' : overview.scheduler.outbox_backlog > 1000 || overview.scheduler.outbox_lag_ms > 5000 ? 'warning' : 'normal'}
-                      t={t}
+                      sub={t('ops.schedulerOutboxLag', {
+                        ms: formatNumber(overview.scheduler.outbox_lag_ms),
+                        errors: formatNumber(overview.scheduler.outbox_errors),
+                      })}
+                      icon={<Database className="size-3.5" />}
+                      tone={
+                        overview.scheduler.outbox_errors > 0
+                          ? 'danger'
+                          : overview.scheduler.outbox_backlog > 1000 || overview.scheduler.outbox_lag_ms > 5000
+                            ? 'warning'
+                            : 'normal'
+                      }
                     />
                   </div>
-                ) : null}
-              </div>
-            </div>
+                </CardContent>
+              </Card>
+            ) : null}
 
+            {/* Band 5: Response Context Cache Panorama */}
             <ResponseCacheCard cache={overview.response_cache} t={t} />
-          </>
+          </div>
         ) : null}
       </>
     </StateShell>
+  )
+}
+
+function SchedulerTile({
+  label,
+  value,
+  sub,
+  icon,
+  tone,
+}: {
+  label: string
+  value: string
+  sub: string
+  icon: React.ReactNode
+  tone: MetricTone
+}) {
+  const toneDot = {
+    normal: 'bg-emerald-500',
+    warning: 'bg-amber-500',
+    danger: 'bg-destructive',
+    info: 'bg-primary',
+  }[tone]
+
+  const toneIcon = {
+    normal: 'bg-emerald-500/12 text-emerald-600 dark:text-emerald-400',
+    warning: 'bg-amber-500/12 text-amber-600 dark:text-amber-400',
+    danger: 'bg-destructive/12 text-destructive',
+    info: 'bg-primary/10 text-primary',
+  }[tone]
+
+  return (
+    <div className="flex flex-col justify-between rounded-xl border border-border/65 bg-muted/20 p-3.5 transition-colors hover:border-border">
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-[11.5px] font-medium text-muted-foreground" title={label}>
+          {label}
+        </span>
+        <span className={cn('flex size-6 shrink-0 items-center justify-center rounded-md', toneIcon)} aria-hidden="true">
+          {icon}
+        </span>
+      </div>
+      <div className="mt-2.5 flex items-center gap-1.5">
+        <span className={cn('size-1.5 shrink-0 rounded-full', toneDot)} />
+        <strong className="truncate font-sans text-[20px] leading-tight font-semibold tracking-[-0.02em] text-foreground tabular-nums">
+          {value}
+        </strong>
+      </div>
+      <p className="mt-1.5 line-clamp-2 text-[11px] leading-relaxed text-muted-foreground" title={sub}>
+        {sub}
+      </p>
+    </div>
   )
 }
 
@@ -359,10 +346,10 @@ function ResponseCacheCard({
 }) {
   if (!cache) {
     return (
-      <Card className="mt-6">
-        <CardContent className="p-6">
-          <h3 className="text-base font-semibold text-foreground">{t('ops.responseCache.title')}</h3>
-          <p className="mt-1 text-sm text-muted-foreground">{t('ops.responseCache.unavailable')}</p>
+      <Card className="rounded-2xl border-border/75 bg-card py-0 shadow-2xs">
+        <CardContent className="p-5">
+          <h3 className="text-[15px] font-semibold text-foreground">{t('ops.responseCache.title')}</h3>
+          <p className="mt-1 text-xs text-muted-foreground">{t('ops.responseCache.unavailable')}</p>
         </CardContent>
       </Card>
     )
@@ -370,6 +357,7 @@ function ResponseCacheCard({
 
   const maxBytes = cache.max_bytes || cache.applied_config.local_max_bytes
   const utilization = cacheUtilizationPercent(cache.current_bytes, maxBytes)
+  const entryPct = cache.max_entries > 0 ? Math.min(100, (cache.entries / cache.max_entries) * 100) : 0
   const syncTone: MetricTone = cache.last_config_sync_error
     ? 'danger'
     : cache.effective_config.generation !== cache.applied_config.generation
@@ -385,39 +373,68 @@ function ResponseCacheCard({
         ? t('ops.responseCache.syncHealthy')
         : t('ops.responseCache.syncWaiting')
   const syncStyle = {
-    normal: 'bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]',
-    warning: 'bg-amber-500/10 text-amber-600',
-    danger: 'bg-destructive/10 text-destructive',
+    normal: 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300',
+    warning: 'bg-amber-500/12 text-amber-700 dark:text-amber-300',
+    danger: 'bg-destructive/12 text-destructive',
     info: 'bg-primary/10 text-primary',
   }[syncTone]
 
   const localHitRate = calculateHitRatePercent(cache.local_hits, cache.local_misses)
   const remoteHitRate = calculateHitRatePercent(cache.remote_hits, cache.remote_misses)
+  const writePolicy = cache.applied_config.write_policy || cache.effective_config.write_policy
 
   return (
-    <Card className="mt-6">
-      <CardContent className="p-6">
+    <Card className="rounded-2xl border-border/75 bg-card py-0 shadow-2xs">
+      <CardContent className="p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h3 className="text-base font-semibold text-foreground">{t('ops.responseCache.title')}</h3>
-            <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{t('ops.responseCache.description')}</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="flex items-center gap-2 text-[15px] font-semibold tracking-tight text-foreground">
+                <HardDrive className="size-4 text-primary" />
+                {t('ops.responseCache.title')}
+              </h3>
+              {writePolicy ? (
+                <span className="rounded-md bg-muted/60 px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
+                  {t('ops.responseCache.writePolicy')}: {writePolicy}
+                </span>
+              ) : null}
+              {typeof cache.chain_owners === 'number' ? (
+                <span className="rounded-md bg-muted/60 px-2 py-0.5 font-sans text-[11px] text-muted-foreground tabular-nums">
+                  {t('ops.responseCache.chainOwners')}: {formatNumber(cache.chain_owners)}
+                </span>
+              ) : null}
+            </div>
+            <p className="mt-1 max-w-3xl text-xs text-muted-foreground">{t('ops.responseCache.description')}</p>
           </div>
-          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${syncStyle}`}>
-            <span className={cn('size-2 rounded-full', syncTone === 'danger' ? 'bg-destructive' : syncTone === 'warning' ? 'bg-amber-500' : syncTone === 'info' ? 'bg-primary' : 'bg-emerald-500')} />
+          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${syncStyle}`}>
+            <span
+              className={cn(
+                'size-1.5 rounded-full',
+                syncTone === 'danger'
+                  ? 'bg-destructive'
+                  : syncTone === 'warning'
+                    ? 'bg-amber-500'
+                    : syncTone === 'info'
+                      ? 'bg-primary'
+                      : 'bg-emerald-500',
+              )}
+            />
             {syncLabel}
           </span>
         </div>
 
-        <div className="mt-5 grid gap-3 md:grid-cols-3">
-          <div className="rounded-lg border border-border/80 bg-muted/20 p-4 md:col-span-2">
-            <div className="flex items-center justify-between gap-3 text-sm">
-              <span className="font-semibold text-foreground">{t('ops.responseCache.logicalBudget')}</span>
-              <span className="font-semibold tabular-nums text-foreground">
-                {formatIECBytes(cache.current_bytes)} / {formatIECBytes(maxBytes)}
+        {/* Budget + Entries Top Row */}
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          <div className="rounded-xl border border-border/65 bg-muted/20 p-4 md:col-span-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="font-medium text-foreground">{t('ops.responseCache.logicalBudget')}</span>
+              <span className="font-sans text-[13px] font-semibold text-foreground tabular-nums">
+                {formatIECBytes(cache.current_bytes)}{' '}
+                <span className="font-normal text-muted-foreground">/ {formatIECBytes(maxBytes)}</span>
               </span>
             </div>
             <div
-              className="mt-3 h-2 overflow-hidden rounded-full bg-muted"
+              className="mt-2.5 h-2 overflow-hidden rounded-full bg-muted/80"
               role="progressbar"
               aria-label={t('ops.responseCache.logicalBudget')}
               aria-valuemin={0}
@@ -432,18 +449,28 @@ function ResponseCacheCard({
                 style={{ width: `${utilization}%` }}
               />
             </div>
-            <p className="mt-2 text-xs text-muted-foreground">
-              {t('ops.responseCache.logicalBudgetHint', { percent: utilization.toFixed(1) })}
-            </p>
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-muted-foreground">
+              <span>{t('ops.responseCache.logicalBudgetHint', { percent: utilization.toFixed(1) })}</span>
+              {typeof cache.shared_payload_bytes === 'number' && cache.shared_payload_bytes > 0 ? (
+                <span className="font-sans tabular-nums">
+                  {t('ops.responseCache.sharedPayload')}: {formatIECBytes(cache.shared_payload_bytes)}
+                </span>
+              ) : null}
+            </div>
           </div>
-          <div className="rounded-lg border border-border/80 bg-muted/20 p-4">
-            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              {t('ops.responseCache.entries')}
+
+          <div className="flex flex-col justify-between rounded-xl border border-border/65 bg-muted/20 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-medium text-muted-foreground">{t('ops.responseCache.entries')}</span>
+              <span className="font-sans text-[11px] font-medium text-muted-foreground tabular-nums">
+                {entryPct.toFixed(0)}%
+              </span>
             </div>
-            <div className="mt-2 text-2xl font-bold tabular-nums text-foreground">
-              {formatNumber(cache.entries)} / {formatNumber(cache.max_entries)}
+            <div className="mt-1.5 font-sans text-[22px] leading-tight font-semibold tracking-[-0.02em] text-foreground tabular-nums">
+              {formatNumber(cache.entries)}
+              <span className="text-sm font-normal text-muted-foreground/75"> / {formatNumber(cache.max_entries)}</span>
             </div>
-            <p className="mt-2 text-xs text-muted-foreground">
+            <p className="mt-1.5 text-[11px] text-muted-foreground tabular-nums">
               {t('ops.responseCache.generations', {
                 effective: cache.effective_config.generation,
                 applied: cache.applied_config.generation,
@@ -452,7 +479,8 @@ function ResponseCacheCard({
           </div>
         </div>
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {/* 4x2 Telemetry Grid */}
+        <div className="mt-3.5 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
           <CacheMetricTile
             label={t('ops.responseCache.highWater')}
             value={formatIECBytes(cache.high_water_bytes)}
@@ -469,7 +497,7 @@ function ResponseCacheCard({
             sub={t('ops.responseCache.hitMiss')}
             badge={
               localHitRate !== null ? (
-                <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[11px] font-semibold text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400">
+                <span className="rounded-md bg-emerald-500/12 px-1.5 py-0.5 font-sans text-[11px] font-medium text-emerald-700 tabular-nums dark:text-emerald-300">
                   {t('ops.hitRate', { rate: localHitRate })}
                 </span>
               ) : undefined
@@ -481,7 +509,7 @@ function ResponseCacheCard({
             sub={t('ops.responseCache.hitMiss')}
             badge={
               remoteHitRate !== null ? (
-                <span className="rounded bg-blue-500/10 px-1.5 py-0.5 text-[11px] font-semibold text-blue-600 dark:bg-blue-500/20 dark:text-blue-400">
+                <span className="rounded-md bg-sky-500/12 px-1.5 py-0.5 font-sans text-[11px] font-medium text-sky-700 tabular-nums dark:text-sky-300">
                   {t('ops.hitRate', { rate: remoteHitRate })}
                 </span>
               ) : undefined
@@ -500,21 +528,34 @@ function ResponseCacheCard({
           <CacheMetricTile
             label={t('ops.responseCache.oversize')}
             value={`${formatNumber(cache.oversize_bypasses)} / ${formatNumber(cache.oversize_rejections)}`}
-            sub={t('ops.responseCache.bypassRejection')}
+            sub={
+              typeof cache.skipped_writes === 'number' && cache.skipped_writes > 0
+                ? `${t('ops.responseCache.skippedWrites')}: ${formatNumber(cache.skipped_writes)}`
+                : t('ops.responseCache.bypassRejection')
+            }
           />
           <CacheMetricTile
             label={t('ops.responseCache.unavailableErrors')}
-            value={formatNumber(cache.known_unavailable_errors)}
+            value={
+              typeof cache.backend_write_failures === 'number' && cache.backend_write_failures > 0
+                ? `${formatNumber(cache.known_unavailable_errors)} / ${formatNumber(cache.backend_write_failures)}`
+                : formatNumber(cache.known_unavailable_errors)
+            }
             sub={
               cache.last_config_sync_at
                 ? t('ops.responseCache.lastSync', { time: formatDateTimeLabel(cache.last_config_sync_at) })
                 : t('ops.responseCache.neverSynced')
             }
+            tone={
+              cache.known_unavailable_errors > 0 || (cache.backend_write_failures ?? 0) > 0
+                ? 'danger'
+                : 'default'
+            }
           />
         </div>
 
         {cache.last_config_sync_error ? (
-          <p role="alert" className="mt-4 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          <p role="alert" className="mt-4 rounded-xl border border-destructive/25 bg-destructive/5 px-3.5 py-2.5 text-xs text-destructive">
             {t('ops.responseCache.syncErrorDetail', { error: cache.last_config_sync_error })}
           </p>
         ) : null}
@@ -528,157 +569,33 @@ function CacheMetricTile({
   value,
   sub,
   badge,
+  tone = 'default',
 }: {
   label: string
   value: string
   sub: string
   badge?: React.ReactNode
+  tone?: 'default' | 'danger'
 }) {
   return (
-    <div className="rounded-lg border border-border/70 bg-card px-3.5 py-3 transition-colors hover:border-primary/30">
+    <div className="rounded-xl border border-border/65 bg-background/70 px-3.5 py-3 transition-colors hover:border-border">
       <div className="flex items-center justify-between gap-2">
-        <div className="text-xs font-semibold text-muted-foreground">{label}</div>
+        <div className="truncate text-[11.5px] font-medium text-muted-foreground">{label}</div>
         {badge}
       </div>
-      <div className="mt-2 text-lg font-bold tabular-nums text-foreground">{value}</div>
-      <div className="mt-1 text-xs leading-relaxed text-muted-foreground">{sub}</div>
+      <div
+        className={cn(
+          'mt-1.5 font-sans text-[17px] leading-snug font-semibold tracking-[-0.02em] tabular-nums',
+          tone === 'danger' ? 'text-destructive' : 'text-foreground',
+        )}
+      >
+        {value}
+      </div>
+      <div className="mt-1 truncate text-[11px] text-muted-foreground" title={sub}>
+        {sub}
+      </div>
     </div>
   )
-}
-
-function MemoryDetail({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="inline-flex min-w-0 items-baseline gap-1 overflow-hidden whitespace-nowrap">
-      <dt className="text-[11px] font-medium text-muted-foreground">{label}:</dt>
-      <dd className="truncate text-[11px] font-semibold tabular-nums text-foreground/90">{value}</dd>
-    </div>
-  )
-}
-
-const METRIC_TONE_DOT: Record<MetricTone, string> = {
-  normal: 'bg-emerald-500',
-  warning: 'bg-amber-500',
-  danger: 'bg-destructive',
-  info: 'bg-primary',
-}
-
-function OpsMetricCard({
-  label,
-  value,
-  sub,
-  icon,
-  tone,
-  progressPercent,
-  secondaryProgress,
-  t,
-}: {
-  label: string
-  value: string
-  sub: React.ReactNode
-  icon: React.ReactNode
-  tone: MetricTone
-  progressPercent?: number
-  secondaryProgress?: { label: string; value: string; percent: number; tone: MetricTone }
-  t: (key: string) => string
-}) {
-  const toneStyle = {
-    normal: {
-      badge: 'bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]',
-      dot: 'bg-emerald-500',
-      icon: 'bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]',
-      label: t('common.normal'),
-    },
-    warning: {
-      badge: 'bg-amber-500/10 text-amber-600',
-      dot: 'bg-amber-500',
-      icon: 'bg-amber-500/10 text-amber-600',
-      label: t('common.warning'),
-    },
-    danger: {
-      badge: 'bg-destructive/10 text-destructive',
-      dot: 'bg-destructive',
-      icon: 'bg-destructive/10 text-destructive',
-      label: t('common.danger'),
-    },
-    info: {
-      badge: 'bg-primary/10 text-primary',
-      dot: 'bg-primary',
-      icon: 'bg-primary/10 text-primary',
-      label: t('common.info'),
-    },
-  }[tone]
-
-  return (
-    <Card className="py-0 transition-all duration-200 hover:border-primary/30 hover:shadow-sm">
-      <CardContent className="p-4">
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-[13px] font-semibold text-muted-foreground">{label}</span>
-          {tone !== 'normal' ? (
-            <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-semibold ${toneStyle.badge}`}>
-              <span className={`size-2 rounded-full ${toneStyle.dot}`} />
-              {toneStyle.label}
-            </span>
-          ) : null}
-        </div>
-
-        <div className="mt-4">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0 text-[28px] font-bold leading-none tracking-tight tabular-nums text-foreground">{value}</div>
-            <div
-              className={`flex size-10 shrink-0 items-center justify-center rounded-lg ${toneStyle.icon}`}
-              aria-hidden="true"
-            >
-              {icon}
-            </div>
-          </div>
-
-          {typeof progressPercent === 'number' && !Number.isNaN(progressPercent) ? (
-            <div className="mt-3.5 h-1.5 w-full overflow-hidden rounded-full bg-muted/60">
-              <div
-                className={cn('h-full rounded-full transition-all duration-500', toneStyle.dot)}
-                style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }}
-              />
-            </div>
-          ) : null}
-
-          {secondaryProgress ? (
-            <div className="mt-2.5">
-              <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-                <span className="truncate">{secondaryProgress.label}</span>
-                <span className="shrink-0 tabular-nums">{secondaryProgress.value}</span>
-              </div>
-              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted/60">
-                <div
-                  className={cn('h-full rounded-full transition-all duration-500', METRIC_TONE_DOT[secondaryProgress.tone])}
-                  style={{ width: `${Math.min(100, Math.max(0, secondaryProgress.percent))}%` }}
-                />
-              </div>
-            </div>
-          ) : null}
-
-          <div className="mt-3 min-w-0 text-[12px] leading-relaxed text-muted-foreground">{sub}</div>
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function getPercentTone(value: number, warningThreshold: number, dangerThreshold: number): MetricTone {
-  if (value >= dangerThreshold) return 'danger'
-  if (value >= warningThreshold) return 'warning'
-  return 'normal'
-}
-
-function getDatabaseTone(overview: OpsOverviewResponse): MetricTone {
-  if (!overview.postgres.healthy) return 'danger'
-  if (overview.database_driver === 'sqlite') return 'normal'
-  return getPercentTone(overview.postgres.usage_percent, 75, 90)
-}
-
-function getCacheTone(overview: OpsOverviewResponse): MetricTone {
-  if (!overview.redis.healthy) return 'danger'
-  if (overview.cache_driver === 'memory') return 'normal'
-  return getPercentTone(overview.redis.usage_percent, 70, 90)
 }
 
 function calculateHitRatePercent(hits: number, misses: number): string | null {
@@ -721,20 +638,4 @@ function formatTimeLabel(iso: string): string {
     hour12: false,
     timeZone: getTimezone(),
   })
-}
-
-function formatUptime(seconds: number, t: (key: string) => string): string {
-  if (seconds <= 0) return t('ops.justStarted')
-
-  const days = Math.floor(seconds / 86400)
-  const hours = Math.floor((seconds % 86400) / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-
-  if (days > 0) {
-    return `${days}${t('ops.days')} ${hours}${t('ops.hours')}`
-  }
-  if (hours > 0) {
-    return `${hours}${t('ops.hours')} ${minutes}${t('ops.minutes')}`
-  }
-  return `${minutes}${t('ops.minutes')}`
 }
