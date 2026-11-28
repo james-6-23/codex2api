@@ -1,4 +1,4 @@
-import type { ChangeEvent, FocusEvent, ReactNode } from 'react'
+import type { ChangeEvent, FocusEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api, resetAdminAuthState, setAdminKey } from '../api'
@@ -7,6 +7,7 @@ import DisplayTimezoneSelect from '../components/DisplayTimezoneSelect'
 import PageHeader from '../components/PageHeader'
 import CodexClientVersionsPanel from '../components/CodexClientVersionsPanel'
 import BackgroundQuietHoursEditor from '../components/BackgroundQuietHoursEditor'
+import SettingsQuickSearch, { type SettingsQuickJumpEntry } from '../components/SettingsQuickSearch'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
@@ -94,6 +95,7 @@ import {
 import {
   Activity,
   ArrowRight,
+  ArrowUp,
   ArrowUpRight,
   Braces,
   Brain,
@@ -103,6 +105,7 @@ import {
   CircleAlert,
   CircleHelp,
   Cloud,
+  Copy,
   Database,
   ExternalLink,
   Eye,
@@ -113,6 +116,7 @@ import {
   Layers,
   Link2,
   Loader2,
+  Lock,
   Palette,
   Plus,
   RefreshCw,
@@ -133,6 +137,7 @@ import {
   Wrench,
   X,
 } from 'lucide-react'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import ChannelLogo from '../components/ChannelLogo'
 import ChannelScopeBadges, { ALL_UPSTREAM_CHANNELS } from '../components/ChannelScopeBadges'
@@ -301,6 +306,42 @@ const SETTINGS_TAB_SECTION_INDEX: Record<SettingsTabKey, ReadonlyArray<{ id: str
 const SETTINGS_SECTION_SPY_OFFSET_PX = 140
 // 手动保存字段的脏检查里跳过的键：生成号是服务端只读，自定义 Prompt 规则由规则页单独保存。
 const SETTINGS_DIRTY_IGNORED_KEYS: ReadonlySet<string> = new Set(['response_cache_config_generation', 'output_guard_config_generation', 'prompt_filter_custom_patterns', 'codex_images_default_main_model', 'codex_egress'])
+
+const APPEARANCE_DIRTY_KEYS: ReadonlySet<string> = new Set([
+  'site_name',
+  'site_logo',
+  'background_image',
+  'background_opacity',
+  'background_blur',
+  'background_glass_opacity',
+  'background_glass_blur',
+])
+
+function resolveDirtyTab(key: string): SettingsTabKey {
+  if (APPEARANCE_DIRTY_KEYS.has(key)) return 'appearance'
+  if (key.startsWith('grok_')) return 'grok'
+  if (
+    key.startsWith('codex_') ||
+    key.startsWith('background_refresh_') ||
+    key.startsWith('background_quiet_') ||
+    key.startsWith('usage_probe_') ||
+    key.startsWith('recovery_probe_') ||
+    key.startsWith('test_') ||
+    key.startsWith('auto_reset_credits_') ||
+    key.startsWith('auto_activate_5h_') ||
+    key.startsWith('global_auto_pause_') ||
+    key.startsWith('response_cache_') ||
+    key.startsWith('overflow_auto_compact_') ||
+    key.startsWith('compact_via_responses_') ||
+    key.startsWith('utls_shutdown_') ||
+    key === 'lazy_mode' ||
+    key === 'model_mapping' ||
+    key === 'reasoning_effort_models'
+  ) {
+    return 'codex'
+  }
+  return 'general'
+}
 
 // 以 KiB/MiB 展示、blur 自动保存的字节上限字段：展示值是四舍五入后的整数，
 // blur 提交必须回到持久化的原始字节值判断，否则未编辑的字段也会被舍入改写。
@@ -1602,41 +1643,48 @@ function SettingsCard({
   return (
     <Card
       className={cn(
-        'gap-0 py-0 border-border/60 bg-card shadow-2xs',
-        tone === 'danger' && 'border-destructive/30 bg-destructive/[0.02]',
+        'gap-0 overflow-hidden rounded-2xl border-border/75 bg-card py-0 shadow-2xs transition-colors hover:border-border',
+        tone === 'danger' && 'border-destructive/30 bg-destructive/[0.025] hover:border-destructive/45',
         className,
       )}
     >
-      <CardContent className={cn('p-4.5 sm:p-5.5', contentClassName)}>
-        <div className="mb-4.5 flex shrink-0 items-start gap-3">
-          {icon ? (
-            <div
-              className={cn(
-                'flex size-8 shrink-0 items-center justify-center rounded-lg ring-1 ring-inset',
-                tone === 'danger'
-                  ? 'bg-destructive/10 text-destructive ring-destructive/20'
-                  : 'bg-muted/70 text-muted-foreground ring-border/60',
-              )}
-              aria-hidden="true"
-            >
-              <span className="[&_svg]:size-4">{icon}</span>
-            </div>
-          ) : null}
-          <div className="min-w-0 flex-1 pt-0.5">
-            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-              <h3 className="text-sm font-semibold leading-snug tracking-tight text-foreground sm:text-[15px]">
-                {title}
-              </h3>
-              {badge}
-              {channels && channels.length > 0 ? <ChannelScopeBadges channels={channels} /> : null}
-            </div>
-            {description ? (
-              <p className="mt-1 text-xs leading-relaxed text-muted-foreground/90">{description}</p>
-            ) : null}
+      <div
+        className={cn(
+          'flex shrink-0 items-start gap-3 border-b px-5 py-3.5',
+          tone === 'danger'
+            ? 'border-destructive/20 bg-destructive/[0.05]'
+            : 'border-border/50 bg-muted/22',
+        )}
+      >
+        {icon ? (
+          <div
+            className={cn(
+              'flex size-8 shrink-0 items-center justify-center rounded-xl ring-1 ring-inset',
+              tone === 'danger'
+                ? 'bg-destructive/12 text-destructive ring-destructive/25'
+                : 'bg-background text-primary shadow-2xs ring-border/70',
+            )}
+            aria-hidden="true"
+          >
+            <span className="[&_svg]:size-4">{icon}</span>
           </div>
+        ) : null}
+        <div className="min-w-0 flex-1 pt-0.5">
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+            <h3 className="text-[14.5px] font-semibold leading-snug tracking-tight text-foreground">
+              {title}
+            </h3>
+            {badge}
+            {channels && channels.length > 0 ? <ChannelScopeBadges channels={channels} /> : null}
+          </div>
+          {description ? (
+            <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{description}</p>
+          ) : null}
         </div>
+      </div>
+      <CardContent className={cn('p-5', contentClassName)}>
         {children}
-        {footer ? <div className="mt-4.5 border-t border-border/60 pt-4 sm:mt-5">{footer}</div> : null}
+        {footer ? <div className="mt-4.5 border-t border-border/55 pt-4 sm:mt-5">{footer}</div> : null}
       </CardContent>
     </Card>
   )
@@ -1652,11 +1700,11 @@ function SettingsCollapsibleNote({
   return (
     <details
       role="note"
-      className="group overflow-hidden rounded-lg border border-primary/20 bg-primary/5"
+      className="group overflow-hidden rounded-xl border border-primary/20 bg-primary/[0.04]"
     >
-      <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3 py-2.5 marker:content-none transition-colors hover:bg-primary/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3.5 py-2.5 marker:content-none transition-colors hover:bg-primary/[0.07] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden">
         <CircleHelp className="size-4 shrink-0 text-primary" aria-hidden="true" />
-        <span className="min-w-0 flex-1 text-xs font-semibold text-foreground">
+        <span className="min-w-0 flex-1 text-xs font-medium text-foreground">
           {title}
         </span>
         <ChevronDown
@@ -1664,8 +1712,8 @@ function SettingsCollapsibleNote({
           aria-hidden="true"
         />
       </summary>
-      <div className="border-t border-primary/10 px-3 pb-2.5 pt-2">
-        <p className="text-[11px] leading-relaxed text-muted-foreground sm:text-xs">
+      <div className="border-t border-primary/10 px-3.5 pb-3 pt-2">
+        <p className="text-[11.5px] leading-relaxed text-muted-foreground sm:text-xs">
           {children}
         </p>
       </div>
@@ -1680,7 +1728,7 @@ function SettingHelp({ text }: { text: string }) {
         <TooltipTrigger asChild>
           <button
             type="button"
-            className="inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground/80 transition-colors hover:bg-muted hover:text-foreground"
+            className="inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground"
             aria-label={text}
           >
             <CircleHelp className="size-3.5" />
@@ -1689,7 +1737,7 @@ function SettingHelp({ text }: { text: string }) {
         <TooltipContent
           side="top"
           sideOffset={6}
-          className="max-w-[280px] bg-popover px-3 py-2 text-left text-xs leading-relaxed text-popover-foreground shadow-md"
+          className="max-w-[280px] rounded-xl bg-popover px-3 py-2 text-left text-xs leading-relaxed text-popover-foreground shadow-lg"
         >
           {text}
         </TooltipContent>
@@ -1726,10 +1774,10 @@ function SettingField({
   const scope = channels && channels.length > 0 ? <ChannelScopeBadges channels={channels} size="xs" /> : null
   const control = suffix ? (
     <div className="relative min-w-0">
-      <div className="[&_[data-slot=input]]:pr-11 [&_[data-slot=select-trigger]]:pr-11 [&_input]:pr-11">
+      <div className="[&_[data-slot=input]]:pr-14 [&_[data-slot=select-trigger]]:pr-14 [&_input]:pr-14">
         {children}
       </div>
-      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-medium tabular-nums text-muted-foreground">
+      <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded-md bg-muted/70 px-1.5 py-0.5 font-sans text-[10.5px] font-medium tabular-nums text-muted-foreground">
         {suffix}
       </span>
     </div>
@@ -1739,10 +1787,10 @@ function SettingField({
 
   if (layout === 'row') {
     return (
-      <div className={cn('flex min-w-0 items-start justify-between gap-4 py-4 first:pt-0 last:pb-0', className)}>
+      <div className={cn('-mx-2 flex min-w-0 items-start justify-between gap-4 rounded-xl px-2 py-3.5 transition-colors first:pt-1 last:pb-1 hover:bg-muted/25', className)}>
         <div className="min-w-0 flex-1 space-y-1">
           <div className="flex flex-wrap items-center gap-1.5">
-            <label className="text-[13px] font-semibold leading-snug text-foreground sm:text-sm">{label}</label>
+            <label className="text-[13px] font-medium leading-snug text-foreground sm:text-[13.5px]">{label}</label>
             {help ? <SettingHelp text={help} /> : null}
             {scope}
           </div>
@@ -1763,14 +1811,23 @@ function SettingField({
   if (layout === 'switch') {
     return (
       <div
+        onClick={(e) => {
+          const target = e.target as HTMLElement | null
+          if (!target) return
+          if (target.closest('button, a, input, select, textarea, [role="switch"], [data-slot="tooltip-trigger"]')) {
+            return
+          }
+          const switchEl = e.currentTarget.querySelector<HTMLButtonElement>('button[role="switch"]:not(:disabled)')
+          switchEl?.click()
+        }}
         className={cn(
-          'flex min-h-[52px] min-w-0 items-center justify-between gap-3 rounded-xl border border-border/70 bg-card p-3.5 shadow-2xs transition-colors hover:border-border/90',
+          'flex min-h-[48px] min-w-0 cursor-pointer select-none items-center justify-between gap-3 rounded-xl border border-border/55 bg-muted/20 px-3.5 py-2.5 transition-all duration-150 hover:border-border/85 hover:bg-muted/40 active:scale-[0.996] has-[[data-state=checked]]:border-primary/30 has-[[data-state=checked]]:bg-primary/[0.045] has-[[data-state=checked]]:shadow-2xs',
           className,
         )}
       >
         <div className="min-w-0 flex-1 space-y-0.5">
           <div className="flex items-center gap-1.5">
-            <label className="block text-[13px] font-semibold leading-snug text-foreground sm:text-sm">
+            <label className="block cursor-pointer text-[13px] font-medium leading-snug text-foreground">
               {label}
             </label>
             {tooltip ? <SettingHelp text={tooltip} /> : null}
@@ -1790,7 +1847,7 @@ function SettingField({
   return (
     <div className={cn('flex min-w-0 flex-col gap-1.5', stretch && 'flex-1', className)}>
       <div className="flex min-h-5 items-center gap-1.5">
-        <label className="block text-[13px] font-semibold leading-none text-foreground sm:text-sm">
+        <label className="block text-[12.5px] font-medium leading-none text-foreground/90">
           {label}
         </label>
         {tooltip ? <SettingHelp text={tooltip} /> : null}
@@ -2181,15 +2238,15 @@ function StatusTile({
   return (
     <div
       data-slot="status-tile"
-      className="flex min-h-[80px] flex-col justify-between gap-2.5 rounded-xl border border-border/70 bg-gradient-to-br from-card via-card to-muted/20 p-3.5 shadow-2xs transition-all hover:border-border"
+      className="flex min-h-[78px] flex-col justify-between gap-2.5 rounded-xl border border-border/65 bg-muted/20 p-3.5 transition-colors hover:border-border"
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/90">
+        <span className="text-[11.5px] font-medium text-muted-foreground">
           {label}
         </span>
-        {icon ? <span className="text-muted-foreground/70 [&_svg]:size-4">{icon}</span> : null}
+        {icon ? <span className="text-muted-foreground/70 [&_svg]:size-3.5">{icon}</span> : null}
       </div>
-      <div className="flex min-h-6 items-center text-sm font-bold tabular-nums text-foreground">
+      <div className="flex min-h-6 items-center font-sans text-[19px] font-semibold tracking-[-0.02em] tabular-nums text-foreground">
         {children}
       </div>
     </div>
@@ -2215,14 +2272,14 @@ function SegmentedPillGroup<T extends string>({
   return (
     <div
       className={cn(
-        'relative flex items-center rounded-xl border border-border/70 bg-muted/35 p-1 shadow-2xs select-none',
+        'relative flex items-center rounded-xl border border-border/70 bg-muted/40 p-1 shadow-2xs select-none',
         className,
       )}
     >
       {/* 平滑滑块背景 indicator */}
       {activeIndex >= 0 && count > 0 ? (
         <div
-          className="absolute inset-y-1 rounded-lg bg-background shadow-xs ring-1 ring-border/60 transition-all duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]"
+          className="absolute inset-y-1 rounded-lg bg-background shadow-2xs ring-1 ring-border/70 transition-all duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]"
           style={{
             width: `calc((100% - 0.5rem) / ${count})`,
             left: `calc(0.25rem + ${activeIndex} * ((100% - 0.5rem) / ${count}))`,
@@ -2241,9 +2298,9 @@ function SegmentedPillGroup<T extends string>({
               disabled={disabled}
               onClick={() => onChange(opt.value)}
               className={cn(
-                'flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors duration-200 active:scale-98',
+                'flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors duration-150',
                 active
-                  ? 'text-foreground font-bold'
+                  ? 'font-semibold text-foreground'
                   : 'text-muted-foreground hover:text-foreground',
                 disabled && 'opacity-50 cursor-not-allowed',
               )}
@@ -2272,19 +2329,22 @@ function SettingsSection({
   children: ReactNode
 }) {
   return (
-    <section id={id} data-settings-section={id} className="scroll-mt-32 space-y-4">
+    <section id={id} data-settings-section={id} className="scroll-mt-36 space-y-4 rounded-2xl transition-shadow duration-500">
       <div className="space-y-1 px-0.5">
         <div className="flex items-center gap-2.5">
           {icon ? (
-            <span className="shrink-0 text-muted-foreground [&_svg]:size-4" aria-hidden="true">
+            <span
+              className="flex size-6 shrink-0 items-center justify-center rounded-lg bg-primary/[0.08] text-primary [&_svg]:size-3.5"
+              aria-hidden="true"
+            >
               {icon}
             </span>
           ) : null}
-          <h2 className="text-[15px] font-semibold tracking-tight text-foreground sm:text-base">{title}</h2>
-          <div className="ml-1 h-px flex-1 bg-border/60" />
+          <h2 className="text-[15px] font-semibold tracking-tight text-foreground">{title}</h2>
+          <div className="ml-1 h-px flex-1 bg-gradient-to-r from-border/75 to-transparent" />
         </div>
         {description ? (
-          <p className="max-w-3xl text-xs leading-relaxed text-muted-foreground">{description}</p>
+          <p className="max-w-3xl pl-8.5 text-xs leading-relaxed text-muted-foreground">{description}</p>
         ) : null}
       </div>
       <div className="space-y-4">{children}</div>
@@ -2353,7 +2413,7 @@ function useActiveSettingsSection(sectionIds: readonly string[]) {
   return { activeId, pinSection }
 }
 
-// Tab 内分区目录：Tab 栏下方居中的磨砂玻璃胶囊条，随 Tab 栏一起粘顶，按滚动位置高亮当前分区。
+// Tab 内分区目录：作为顶部浮动导航坞的下层子导航条，与主 Tab 一体化粘顶。
 function SettingsSectionIndex({
   items,
   activeId,
@@ -2365,12 +2425,20 @@ function SettingsSectionIndex({
   label: string
   onSelect: (id: string) => void
 }) {
+  const reducedMotion = useReducedMotion()
   return (
-    <nav aria-label={label} className="flex justify-center">
+    <nav
+      aria-label={label}
+      className="flex items-center gap-2 rounded-b-2xl border-t border-border/50 bg-muted/22 px-3 py-1.5 dark:bg-muted/15"
+    >
+      <span className="hidden shrink-0 items-center gap-1.5 pr-1 text-[11px] font-medium tracking-wide text-muted-foreground/75 sm:inline-flex">
+        <span className="size-1.5 rounded-full bg-primary/50" aria-hidden="true" />
+        {label}
+      </span>
+      <span aria-hidden="true" className="hidden h-3.5 w-px shrink-0 bg-border/70 sm:block" />
       <div
         className={cn(
-          'flex max-w-full items-center gap-1 overflow-x-auto rounded-full border border-white/50 bg-card/55 p-1 backdrop-blur-xl backdrop-saturate-150 dark:border-white/10 dark:bg-card/45',
-          'shadow-[0_8px_30px_rgb(0_0_0/0.06)] ring-1 ring-black/[0.04] dark:ring-white/[0.05]',
+          'flex min-w-0 flex-1 items-center gap-1 overflow-x-auto py-0.5',
           '[-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
         )}
       >
@@ -2383,16 +2451,27 @@ function SettingsSectionIndex({
               onClick={() => onSelect(item.id)}
               aria-current={active ? 'location' : undefined}
               className={cn(
-                'inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-semibold transition-colors duration-200 [&_svg]:size-3.5',
+                'relative inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1 text-xs font-medium transition-colors duration-150 [&_svg]:size-3.5',
                 active
-                  ? 'bg-primary/12 text-primary shadow-2xs ring-1 ring-primary/15'
-                  : 'text-muted-foreground hover:bg-background/70 hover:text-foreground',
+                  ? 'font-semibold text-foreground'
+                  : 'text-muted-foreground hover:bg-background/60 hover:text-foreground',
               )}
             >
-              <span className={cn('shrink-0', active ? 'opacity-100' : 'opacity-75')} aria-hidden="true">
+              {active ? (
+                <motion.span
+                  layoutId="settings-active-section-pill"
+                  transition={reducedMotion ? { duration: 0 } : { type: 'spring', stiffness: 500, damping: 38 }}
+                  className="pointer-events-none absolute inset-0 rounded-lg bg-background shadow-2xs ring-1 ring-border/75 dark:bg-card dark:ring-primary/30"
+                  aria-hidden="true"
+                />
+              ) : null}
+              <span
+                className={cn('relative z-10 shrink-0 transition-colors', active ? 'text-primary' : 'opacity-70')}
+                aria-hidden="true"
+              >
                 {item.icon}
               </span>
-              {item.label}
+              <span className="relative z-10">{item.label}</span>
             </button>
           )
         })}
@@ -2410,7 +2489,7 @@ const VISIBLE_CHANNEL_LABELS: Record<UpstreamChannel, string> = {
   opencode: 'OpenCode',
 }
 
-// 供应商显示选择器：一排可多选的胶囊，点一下即保存；兜底渠道锁定在选中态。
+// 供应商显示选择器：一组可多选的 Studio 渠道卡片芯片，点一下即保存；兜底渠道锁定在选中态。
 function VisibleChannelsPicker() {
   const { t } = useTranslation()
   const { showToast } = useToast()
@@ -2433,7 +2512,7 @@ function VisibleChannelsPicker() {
       <div
         role="group"
         aria-label={t('settings.visibleChannelsTitle')}
-        className="flex flex-wrap items-center gap-1.5 rounded-xl border border-border/70 bg-muted/35 p-1.5"
+        className="grid grid-cols-2 gap-2.5 sm:grid-cols-3"
       >
         {ALL_VISIBLE_CHANNEL_OPTIONS.map((channel) => {
           const selected = channels.includes(channel)
@@ -2448,18 +2527,29 @@ function VisibleChannelsPicker() {
               title={locked ? t('settings.visibleChannelsFallbackHint') : undefined}
               onClick={() => void toggle(channel)}
               className={cn(
-                'inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-semibold transition-colors duration-200',
+                'flex items-center justify-between gap-2 rounded-xl border px-3 py-2.5 text-left text-[13px] font-medium transition-all duration-150',
                 selected
-                  ? 'bg-primary text-primary-foreground shadow-2xs'
-                  : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground',
+                  ? 'border-primary/40 bg-background text-foreground shadow-2xs ring-1 ring-primary/15'
+                  : 'border-border/55 bg-muted/25 text-muted-foreground opacity-75 hover:border-border hover:bg-muted/45 hover:opacity-100',
                 locked && 'cursor-default',
                 saving && 'opacity-70',
               )}
             >
-              <span className={cn('inline-flex shrink-0', !selected && 'opacity-75 grayscale')}>
-                <ChannelLogo channel={channel} size={16} />
+              <span className="flex min-w-0 items-center gap-2">
+                <span className={cn('inline-flex shrink-0', !selected && 'opacity-65 grayscale')}>
+                  <ChannelLogo channel={channel} size={16} />
+                </span>
+                <span className="truncate">{VISIBLE_CHANNEL_LABELS[channel]}</span>
               </span>
-              {VISIBLE_CHANNEL_LABELS[channel]}
+              {locked ? (
+                <Lock className="size-3.5 shrink-0 text-muted-foreground/70" aria-hidden="true" />
+              ) : selected ? (
+                <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-primary/12 text-primary">
+                  <Check className="size-2.5" aria-hidden="true" />
+                </span>
+              ) : (
+                <span className="size-4 shrink-0 rounded-full border border-border/80" aria-hidden="true" />
+              )}
             </button>
           )
         })}
@@ -2478,24 +2568,25 @@ function SaveStatusPill({
   dirtyCount: number
 }) {
   const { t } = useTranslation()
-  let tone = 'text-muted-foreground'
-  let icon: ReactNode = <Check className="size-3.5" />
+  let tone = 'border-border/65 bg-muted/35 text-muted-foreground'
+  let icon: ReactNode = <Check className="size-3.5 text-emerald-600 dark:text-emerald-400" />
   let text = t('settings.saveStatusSaved')
   let title: string | undefined
   if (autoSaveStatus === 'saving') {
+    tone = 'border-primary/25 bg-primary/[0.07] text-primary'
     icon = <Loader2 className="size-3.5 animate-spin" />
     text = t('settings.autoSaving')
   } else if (dirtyCount > 0) {
-    tone = 'text-amber-700 dark:text-amber-300'
-    icon = <span className="size-1.5 rounded-full bg-amber-500" aria-hidden="true" />
+    tone = 'border-amber-500/30 bg-amber-500/[0.08] text-amber-700 dark:text-amber-300'
+    icon = <span className="size-1.5 rounded-full bg-amber-500 animate-pulse" aria-hidden="true" />
     text = t('settings.saveStatusUnsaved', { n: dirtyCount })
     title = t('settings.saveStatusUnsavedHint')
   } else if (autoSaveStatus === 'error') {
-    tone = 'text-destructive'
+    tone = 'border-destructive/30 bg-destructive/[0.08] text-destructive'
     icon = <CircleAlert className="size-3.5" />
     text = t('settings.autoSaveFailed')
   } else if (autoSaveStatus === 'saved') {
-    tone = 'text-emerald-700 dark:text-emerald-300'
+    tone = 'border-emerald-500/25 bg-emerald-500/[0.08] text-emerald-700 dark:text-emerald-300'
     text = t('settings.autoSaved')
   }
   return (
@@ -2503,7 +2594,10 @@ function SaveStatusPill({
       data-slot="save-status"
       title={title}
       aria-live="polite"
-      className={cn('inline-flex h-8 items-center gap-1.5 whitespace-nowrap px-1 text-xs font-medium tabular-nums', tone)}
+      className={cn(
+        'inline-flex h-8.5 items-center gap-1.5 whitespace-nowrap rounded-xl border px-2.5 font-sans text-xs font-medium tabular-nums transition-colors',
+        tone,
+      )}
     >
       {icon}
       {text}
@@ -2788,6 +2882,7 @@ export default function Settings() {
       auto_clean_full_usage: false,
     }
   }, [])
+  const { channels: visibleChannels } = useVisibleChannels()
   const [settingsForm, setSettingsForm] = useState<SystemSettings>({
     site_name: 'CodexProxy',
     site_logo: '',
@@ -3886,12 +3981,80 @@ export default function Settings() {
     setResponseCacheValidationError(null)
   }, [commitSettingsForm, persistedSettings])
   const dirtyKeySet = useMemo(() => new Set(dirtyKeys), [dirtyKeys])
+  const dirtyTabSet = useMemo(() => new Set(dirtyKeys.map(resolveDirtyTab)), [dirtyKeys])
+  const reducedMotion = useReducedMotion()
+  const [copiedEndpoint, setCopiedEndpoint] = useState<string | null>(null)
+  const copiedEndpointTimerRef = useRef<number | null>(null)
+  const [showBackToTop, setShowBackToTop] = useState(false)
+  const saveShortcutLabel = useMemo(
+    () => (typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent) ? '⌘S' : 'Ctrl+S'),
+    [],
+  )
+  const saveShortcutStateRef = useRef({
+    dirtyCount: 0,
+    saving: false,
+    save: () => {},
+    notifySaved: () => {},
+  })
+  saveShortcutStateRef.current = {
+    dirtyCount,
+    saving: savingSettings || autoSaveStatus === 'saving',
+    save: () => {
+      void handleSaveSettings()
+    },
+    notifySaved: () => {
+      showToast(t('settings.saveStatusSaved'), 'info', 1400)
+    },
+  }
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 's') {
+        event.preventDefault()
+        const state = saveShortcutStateRef.current
+        if (state.saving) return
+        if (state.dirtyCount > 0) {
+          state.save()
+        } else {
+          state.notifySaved()
+        }
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  useEffect(() => {
+    if (dirtyCount === 0) return
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [dirtyCount])
+
+  useEffect(() => {
+    const onScroll = () => {
+      setShowBackToTop(window.scrollY > 420)
+    }
+    onScroll()
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
+
+  useEffect(() => () => {
+    if (copiedEndpointTimerRef.current !== null) {
+      window.clearTimeout(copiedEndpointTimerRef.current)
+    }
+  }, [])
+
   const discardSettingsField = useCallback((field: keyof SystemSettings) => {
     if (!persistedSettings) return
     setSettingsForm((form) => ({ ...form, [field]: persistedSettings[field] }))
   }, [persistedSettings])
   // 有未保存改动时保存按钮才是主色；没改动也保留可点，脏检查漏判时用户仍能强制保存。
-  const renderSaveButton = (className?: string) => (
+  const renderSaveButton = (className?: string, showShortcutHint = false) => (
     <Button
       className={className}
       variant={dirtyCount > 0 ? 'default' : 'outline'}
@@ -3900,6 +4063,11 @@ export default function Settings() {
     >
       <Save className="size-4" />
       {saveButtonLabel}
+      {showShortcutHint ? (
+        <kbd className="ml-1 hidden rounded border border-current/25 bg-current/10 px-1 py-0.2 font-mono text-[10px] font-medium opacity-80 sm:inline-block">
+          {saveShortcutLabel}
+        </kbd>
+      ) : null}
     </Button>
   )
 
@@ -3958,13 +4126,6 @@ export default function Settings() {
     },
     [setSearchParams],
   )
-  useEffect(() => {
-    const sectionId = pendingSectionRef.current
-    if (!sectionId) return
-    pendingSectionRef.current = null
-    document.getElementById(sectionId)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  }, [activeTab])
-
   // 兼容旧的 #settings-xxx 锚点深链：首次进入时把锚点映射到对应 Tab。
   useEffect(() => {
     if (tabParam) return
@@ -3987,13 +4148,120 @@ export default function Settings() {
   const sectionIds = useMemo(() => SETTINGS_TAB_SECTION_INDEX[activeTab].map((item) => item.id), [activeTab])
   const { activeId: activeSectionId, pinSection } = useActiveSettingsSection(sectionIds)
   const hasSectionIndex = sectionIndexItems.length > 1
-  const jumpToSection = useCallback((sectionId: string) => {
+  const highlightSection = useCallback((sectionId: string) => {
     pinSection(sectionId)
-    document.getElementById(sectionId)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    const el = document.getElementById(sectionId)
+    el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    if (el) {
+      el.classList.add('ring-2', 'ring-primary/35', 'ring-offset-4', 'ring-offset-background')
+      window.setTimeout(() => {
+        el.classList.remove('ring-2', 'ring-primary/35', 'ring-offset-4', 'ring-offset-background')
+      }, 1400)
+    }
   }, [pinSection])
+  const jumpToSection = highlightSection
+
+  useEffect(() => {
+    const sectionId = pendingSectionRef.current
+    if (!sectionId) return
+    pendingSectionRef.current = null
+    const timer = window.setTimeout(() => {
+      highlightSection(sectionId)
+    }, 60)
+    return () => window.clearTimeout(timer)
+  }, [activeTab, highlightSection])
+
+  const quickSearchEntries = useMemo<ReadonlyArray<SettingsQuickJumpEntry<SettingsTabKey>>>(() => [
+    { tab: 'codex', tabLabel: t('settings.nav.codex'), sectionId: 'settings-codex-quota', title: t('settings.probeScheduling'), keywords: 'codex quota probe lazy 惰性 巡检 暂停 探针 测活 连通性 额度' },
+    { tab: 'codex', tabLabel: t('settings.nav.codex'), sectionId: 'settings-codex-transport', title: t('settings.codexWebsocket'), keywords: 'codex websocket ws 传输 响应缓存 response cache 过载 压缩 compact 续写' },
+    { tab: 'codex', tabLabel: t('settings.nav.codex'), sectionId: 'settings-codex-client', title: t('settings.codexClientTitle'), keywords: 'codex client ua user-agent 指纹 版本 同步 fingerprint' },
+    { tab: 'codex', tabLabel: t('settings.nav.codex'), sectionId: 'settings-codex-images', title: t('settings.nav.codexImages'), keywords: 'codex image 生图 图片 驱动 模型' },
+    { tab: 'codex', tabLabel: t('settings.nav.codex'), sectionId: 'settings-models', title: t('settings.nav.models'), keywords: 'models 模型 映射 mapping 思考强度 reasoning effort' },
+    { tab: 'claude', tabLabel: t('settings.nav.claude'), sectionId: 'settings-claude', title: t('settings.nav.claude'), keywords: 'claude anthropic cli oauth 指纹 时区 连通性' },
+    { tab: 'antigravity', tabLabel: t('settings.nav.antigravity'), sectionId: 'settings-antigravity', title: t('settings.nav.antigravity'), keywords: 'antigravity oauth redirect 重定向 配额 thinking 思考' },
+    { tab: 'grok', tabLabel: t('settings.nav.grok'), sectionId: 'settings-grok', title: t('settings.nav.grok'), keywords: 'grok xai sso 代理 视频 生图' },
+    { tab: 'kiro', tabLabel: t('settings.nav.kiro'), sectionId: 'settings-kiro', title: t('settings.nav.kiro'), keywords: 'kiro aws 连通性' },
+    { tab: 'opencode', tabLabel: t('settings.nav.opencode', { defaultValue: 'OpenCode' }), sectionId: 'settings-opencode', title: t('settings.nav.opencode', { defaultValue: 'OpenCode' }), keywords: 'opencode go zen 连通性' },
+    { tab: 'appearance', tabLabel: t('settings.nav.appearance'), sectionId: 'settings-appearance', title: t('settings.nav.appearance'), keywords: 'appearance 外观 主题 logo 标题 背景 玻璃 模糊 时区' },
+    { tab: 'general', tabLabel: t('settings.nav.general'), sectionId: 'settings-overview', title: t('settings.systemStatus'), keywords: 'status overview 系统状态 供应商 显示 visible channels' },
+    { tab: 'general', tabLabel: t('settings.nav.general'), sectionId: 'settings-traffic', title: t('settings.trafficProtection'), keywords: 'traffic 流量 并发 rpm 重试 retry 429 冷却 cooldown 调度 scheduler 引擎' },
+    { tab: 'general', tabLabel: t('settings.nav.general'), sectionId: 'settings-runtime', title: t('settings.runtimeOptimization'), keywords: 'runtime 运行时 日志 usage log 输出护栏 output guard github' },
+    { tab: 'general', tabLabel: t('settings.nav.general'), sectionId: 'settings-storage', title: t('settings.imageStorage'), keywords: 'storage 存储 图片 清理 cleanup s3 r2' },
+    { tab: 'general', tabLabel: t('settings.nav.general'), sectionId: 'settings-security', title: t('settings.security'), keywords: 'security 安全 密钥 admin secret prompt 过滤' },
+    { tab: 'general', tabLabel: t('settings.nav.general'), sectionId: 'settings-reference', title: t('settings.apiEndpoints'), keywords: 'api endpoints 端点 文档 /v1/responses /v1/messages' },
+  ], [t])
+
+  const handleQuickJump = useCallback((tab: SettingsTabKey, sectionId: string) => {
+    if (tab === activeTab) {
+      jumpToSection(sectionId)
+    } else {
+      selectTab(tab, sectionId)
+    }
+  }, [activeTab, jumpToSection, selectTab])
 
   if (showInitialSkeleton) {
     return <SettingsSkeleton />
+  }
+
+  const activeTabMeta = settingsTabs.find((tab) => tab.id === activeTab) ?? settingsTabs[0]
+  const activeTabDesc = (() => {
+    switch (activeTab) {
+      case 'codex': return t('settings.nav.codexDesc')
+      case 'claude': return t('settings.nav.claudeDesc', { defaultValue: t('settings.nav.codexDesc') })
+      case 'antigravity': return t('settings.nav.antigravityDesc', { defaultValue: t('settings.description') })
+      case 'grok': return t('settings.nav.grokDesc', { defaultValue: t('settings.description') })
+      case 'kiro': return t('settings.nav.kiroDesc')
+      case 'opencode': return t('settings.nav.opencodeDesc', { defaultValue: t('settings.description') })
+      case 'appearance': return t('settings.nav.appearanceDesc', { defaultValue: t('settings.description') })
+      case 'general': return t('settings.nav.generalDesc')
+    }
+  })()
+
+  const heroPills: Array<{
+    label: string
+    value: string
+    tone?: 'emerald' | 'primary' | 'amber' | 'neutral'
+    external?: boolean
+    onClick: () => void
+  }> = (() => {
+    if (activeTab === 'codex') {
+      return [
+        { label: t('settings.backgroundRefreshInterval'), value: `${settingsForm.background_refresh_interval_minutes}m`, tone: 'neutral', onClick: () => jumpToSection('settings-codex-quota') },
+        { label: t('settings.usageProbeConcurrency'), value: String(settingsForm.usage_probe_concurrency), tone: 'neutral', onClick: () => jumpToSection('settings-codex-quota') },
+        { label: 'WebSocket', value: settingsForm.codex_force_websocket ? t('common.enabled') : t('common.disabled'), tone: settingsForm.codex_force_websocket ? 'emerald' : 'neutral', onClick: () => jumpToSection('settings-codex-transport') },
+        { label: t('settings.lazyMode'), value: settingsForm.lazy_mode ? t('common.enabled') : t('common.disabled'), tone: settingsForm.lazy_mode ? 'amber' : 'neutral', onClick: () => jumpToSection('settings-codex-quota') },
+      ]
+    }
+    if (activeTab === 'general') {
+      return [
+        { label: t('settings.service'), value: health?.status === 'ok' ? t('common.running') : t('common.error'), tone: health?.status === 'ok' ? 'emerald' : 'amber', onClick: () => jumpToSection('settings-overview') },
+        { label: t('settings.accountsLabel'), value: `${health?.available ?? 0} / ${health?.total ?? 0}`, tone: 'primary', external: true, onClick: () => navigate('/accounts') },
+        { label: t('settings.maxConcurrency'), value: String(settingsForm.max_concurrency), tone: 'neutral', onClick: () => jumpToSection('settings-traffic') },
+        { label: t('settings.globalRpm'), value: settingsForm.global_rpm > 0 ? `${settingsForm.global_rpm}/m` : '∞', tone: 'neutral', onClick: () => jumpToSection('settings-traffic') },
+      ]
+    }
+    if (activeTab === 'appearance') {
+      return [
+        { label: t('settings.siteName', { defaultValue: 'Site' }), value: settingsForm.site_name || 'CodexProxy', tone: 'primary', onClick: () => jumpToSection('settings-appearance') },
+        { label: t('settings.visibleChannelsTitle'), value: `${visibleChannels.length} / ${ALL_UPSTREAM_CHANNELS.length}`, tone: 'emerald', onClick: () => selectTab('general', 'settings-overview') },
+      ]
+    }
+    return []
+  })()
+
+  const handleTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+    let nextIndex: number | null = null
+    if (event.key === 'ArrowRight') nextIndex = (index + 1) % settingsTabs.length
+    else if (event.key === 'ArrowLeft') nextIndex = (index - 1 + settingsTabs.length) % settingsTabs.length
+    else if (event.key === 'Home') nextIndex = 0
+    else if (event.key === 'End') nextIndex = settingsTabs.length - 1
+    if (nextIndex === null) return
+    event.preventDefault()
+    const targetTab = settingsTabs[nextIndex]
+    selectTab(targetTab.id)
+    window.requestAnimationFrame(() => {
+      settingsNavRef.current?.querySelector<HTMLButtonElement>(`[data-tab-id="${targetTab.id}"]`)?.focus()
+    })
   }
 
   return (
@@ -4011,55 +4279,89 @@ export default function Settings() {
           title={t('settings.title')}
           description={t('settings.description')}
           actions={
-            <>
+            <div className="flex flex-wrap items-center gap-2">
               <SaveStatusPill autoSaveStatus={autoSaveStatus} dirtyCount={dirtyCount} />
-              {renderSaveButton('shrink-0')}
-            </>
+              {renderSaveButton('h-8.5 shrink-0 rounded-xl')}
+            </div>
           }
         />
 
-        {/* Tab 栏 + 分区目录一起跟随页面流、滚动时粘在顶部，不再用 fixed 悬浮盖住内容 */}
-        <div className="sticky top-2 z-30 mb-5 space-y-2.5 lg:top-3">
-          <nav
-            ref={settingsNavRef}
-            role="tablist"
-            aria-label={t('settings.navLabel')}
-            className={cn(
-              'flex min-w-0 items-center gap-1 overflow-x-auto rounded-full border border-border/70 bg-card/95 p-1 shadow-sm backdrop-blur-xl',
-              '[-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
-            )}
-          >
-            {settingsTabs.map((tab) => {
-              const active = activeTab === tab.id
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  role="tab"
-                  data-tab-id={tab.id}
-                  aria-selected={active}
-                  aria-current={active ? 'true' : undefined}
-                  onClick={() => selectTab(tab.id)}
-                  className={cn(
-                    'inline-flex shrink-0 items-center justify-center gap-2 rounded-full px-3.5 py-1.5 text-[13px] font-semibold tracking-tight transition-colors duration-200 sm:flex-1 sm:basis-0 sm:px-4 sm:py-1.5 sm:text-xs',
-                    active
-                      ? 'bg-primary text-primary-foreground shadow-2xs'
-                      : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground',
-                  )}
-                >
-                  <span
-                    className={cn(
-                      'shrink-0 [&_svg]:size-4 sm:[&_svg]:size-[1.05rem]',
-                      active ? 'opacity-100' : 'opacity-75',
-                    )}
-                  >
-                    {tab.icon}
-                  </span>
-                  <span className="whitespace-nowrap">{tab.label}</span>
-                </button>
-              )
-            })}
-          </nav>
+        {/* 顶部一体化 Studio 浮动导航坞：主渠道/系统导航 + 快速搜索 + 下层分区目录 */}
+        <div className="sticky top-2 z-30 mb-6 rounded-2xl border border-border/75 bg-card/90 shadow-[0_8px_28px_-14px_rgba(15,23,42,0.14)] backdrop-blur-xl dark:bg-card/88 dark:shadow-[0_12px_32px_-12px_rgba(0,0,0,0.45)]">
+          <div className="flex flex-col gap-2 p-2 xl:flex-row xl:items-center xl:justify-between xl:gap-3">
+            <nav
+              ref={settingsNavRef}
+              role="tablist"
+              aria-label={t('settings.navLabel')}
+              className={cn(
+                'flex min-w-0 flex-1 items-center gap-1 overflow-x-auto',
+                '[-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
+              )}
+            >
+              {settingsTabs.map((tab, tabIndex) => {
+                const active = activeTab === tab.id
+                const tabHasDirty = dirtyTabSet.has(tab.id)
+                return (
+                  <div key={tab.id} className="flex shrink-0 items-center">
+                    {tab.id === 'appearance' ? (
+                      <span
+                        aria-hidden="true"
+                        className="mx-1.5 h-5 w-px shrink-0 bg-border/80"
+                      />
+                    ) : null}
+                    <button
+                      type="button"
+                      role="tab"
+                      data-tab-id={tab.id}
+                      aria-selected={active}
+                      aria-current={active ? 'true' : undefined}
+                      onClick={() => selectTab(tab.id)}
+                      onKeyDown={(e) => handleTabKeyDown(e, tabIndex)}
+                      className={cn(
+                        'group relative inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-xl px-3 py-2 text-[13px] font-medium tracking-tight transition-colors duration-150',
+                        active
+                          ? 'font-semibold text-primary'
+                          : 'text-muted-foreground hover:bg-muted/65 hover:text-foreground',
+                      )}
+                    >
+                      {active ? (
+                        <motion.span
+                          layoutId="settings-active-tab-pill"
+                          transition={reducedMotion ? { duration: 0 } : { type: 'spring', stiffness: 460, damping: 36 }}
+                          className="pointer-events-none absolute inset-0 rounded-xl bg-primary/[0.11] shadow-2xs ring-1 ring-inset ring-primary/25 dark:bg-primary/18 dark:ring-primary/35"
+                          aria-hidden="true"
+                        />
+                      ) : null}
+                      <span
+                        className={cn(
+                          'relative z-10 shrink-0 transition-transform duration-150 [&_svg]:size-4',
+                          active ? 'scale-[1.03] opacity-100' : 'opacity-80 group-hover:opacity-100',
+                        )}
+                      >
+                        {tab.icon}
+                      </span>
+                      <span className="relative z-10">{tab.label}</span>
+                      {tabHasDirty ? (
+                        <span
+                          title={t('settings.unsavedTabHint')}
+                          aria-label={t('settings.unsavedTabHint')}
+                          className="relative z-10 size-1.5 shrink-0 rounded-full bg-amber-500 ring-2 ring-card"
+                        />
+                      ) : null}
+                    </button>
+                  </div>
+                )
+              })}
+            </nav>
+
+            <SettingsQuickSearch
+              entries={quickSearchEntries}
+              onSelect={handleQuickJump}
+              align="right"
+              className="w-full shrink-0 xl:w-56 2xl:w-64"
+            />
+          </div>
+
           {hasSectionIndex ? (
             <SettingsSectionIndex
               items={sectionIndexItems}
@@ -4070,15 +4372,102 @@ export default function Settings() {
           ) : null}
         </div>
 
-        <div key={activeTab} className="pb-4">
+        <motion.div
+          key={activeTab}
+          initial={reducedMotion ? false : { opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={reducedMotion ? { duration: 0 } : { duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+          className="min-w-0 space-y-6 pb-4"
+        >
+          {/* 全宽上下文 Studio Tab Hero 概览横幅 */}
+          <div className="relative overflow-hidden rounded-2xl border border-border/75 bg-card px-5 py-4.5 shadow-2xs sm:px-6">
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/35 to-transparent"
+            />
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,color-mix(in_oklab,var(--color-primary)_11%,transparent),transparent_62%)]"
+            />
+            <div className="relative z-10 flex flex-col gap-3.5 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex min-w-0 flex-1 items-center gap-3.5">
+                <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-border/70 bg-background/95 shadow-xs [&_svg]:size-5.5">
+                  {activeTabMeta.icon}
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-[18px] font-semibold tracking-tight text-foreground">
+                    {activeTabMeta.label}
+                  </h2>
+                  <p className="mt-0.5 line-clamp-2 max-w-2xl text-[13px] leading-relaxed text-muted-foreground">
+                    {activeTabDesc}
+                  </p>
+                </div>
+              </div>
+
+              {heroPills.length > 0 ? (
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  {heroPills.map((pill) => (
+                    <button
+                      key={pill.label}
+                      type="button"
+                      onClick={pill.onClick}
+                      title={t('settings.jumpToSection')}
+                      className="group rounded-xl border border-border/65 bg-background/85 px-3 py-1.5 text-left shadow-2xs backdrop-blur-xs transition-all duration-150 hover:-translate-y-px hover:border-primary/40 hover:bg-background hover:shadow-xs active:translate-y-0"
+                    >
+                      <span className="flex items-center justify-between gap-2 whitespace-nowrap text-[10.5px] text-muted-foreground">
+                        <span>{pill.label}</span>
+                        {pill.external ? (
+                          <ArrowUpRight className="size-2.5 text-muted-foreground/50 transition-all group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-primary" aria-hidden="true" />
+                        ) : (
+                          <ChevronRight className="size-2.5 text-muted-foreground/40 opacity-0 transition-all group-hover:translate-x-0.5 group-hover:text-primary group-hover:opacity-100" aria-hidden="true" />
+                        )}
+                      </span>
+                      <span
+                        className={cn(
+                          'mt-0.5 flex items-center gap-1.5 whitespace-nowrap font-sans text-[13px] font-semibold tracking-[-0.01em] tabular-nums',
+                          pill.tone === 'emerald'
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : pill.tone === 'amber'
+                              ? 'text-amber-600 dark:text-amber-400'
+                              : pill.tone === 'primary'
+                                ? 'text-primary'
+                                : 'text-foreground',
+                        )}
+                      >
+                        {pill.tone === 'emerald' || pill.tone === 'amber' ? (
+                          <span
+                            className={cn(
+                              'size-1.5 shrink-0 rounded-full',
+                              pill.tone === 'emerald' ? 'bg-emerald-500' : 'bg-amber-500',
+                            )}
+                            aria-hidden="true"
+                          />
+                        ) : null}
+                        {pill.value}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <Link
+                  to={activeTab === 'codex' ? '/accounts' : `/accounts/${activeTab}`}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-border/75 bg-background/90 px-3.5 py-2 text-xs font-medium text-foreground shadow-2xs transition-colors hover:border-primary/35 hover:text-primary"
+                >
+                  <Users className="size-3.5 text-muted-foreground" />
+                  {t('settings.quickManageAccounts')}
+                  <ArrowUpRight className="size-3.5 text-muted-foreground" />
+                </Link>
+              )}
+            </div>
+          </div>
+
           <div className="min-w-0 space-y-7">
           {activeTab === 'codex' ? (
             <>
               <SettingsSection id="settings-codex-quota" title={t('settings.nav.codexQuota')} description={t('settings.nav.codexQuotaDesc')} icon={<Gauge className="size-4" />}>
-              <div className={SETTINGS_CARD_GRID_2}>
                 <SettingsCard title={t('settings.probeScheduling')} icon={<RefreshCw className="size-4" />}>
                   <div className="space-y-4">
-                    <div className={SETTINGS_FIELD_GRID}>
+                    <div className="grid grid-cols-1 gap-x-4 gap-y-4 sm:grid-cols-2 xl:grid-cols-4">
                       <SettingField label={t('settings.backgroundRefreshInterval')} description={t('settings.backgroundRefreshIntervalDesc')} suffix={t('settings.unit.min')}>
                         <DraftNumberInput
                           min={1}
@@ -4103,7 +4492,7 @@ export default function Settings() {
                           onValueChange={(value) => setSettingsForm(f => ({ ...f, usage_probe_concurrency: value }))}
                         />
                       </SettingField>
-                      <SettingField label={t('settings.recoveryProbeInterval')} description={t('settings.recoveryProbeIntervalDesc')}>
+                      <SettingField label={t('settings.recoveryProbeInterval')} description={t('settings.recoveryProbeIntervalDesc')} suffix={t('settings.unit.min')}>
                         {lazyModeActive ? (
                           <Input value="∞" disabled />
                         ) : (
@@ -4177,11 +4566,9 @@ export default function Settings() {
                 title={t('settings.connectivityTest')}
                 description={t('settings.connectivityTestDesc')}
                 icon={<Wifi className="size-4" />}
-                className="h-full"
-                contentClassName="flex h-full flex-col"
               >
-                <div className="flex flex-1 flex-col gap-4">
-                  <div className={SETTINGS_FIELD_GRID}>
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)] lg:items-start">
+                  <div className="space-y-4">
                     <SettingField label={t('settings.testModelLabel')} description={t('settings.testModelHint')}>
                       <Select
                         value={settingsForm.test_model}
@@ -4197,22 +4584,41 @@ export default function Settings() {
                         onValueChange={(value) => setSettingsForm(f => ({ ...f, test_concurrency: value }))}
                       />
                     </SettingField>
+                    <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                      {(['hi', 'ping', '1+1=?'] as const).map((preset) => (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => {
+                            setSettingsForm(f => ({ ...f, test_content: preset }))
+                            void autoSaveStringField('test_content', preset)
+                          }}
+                          className={cn(
+                            'rounded-lg border px-2 py-0.5 font-mono text-[11px] transition-colors',
+                            settingsForm.test_content === preset
+                              ? 'border-primary/35 bg-primary/10 text-primary'
+                              : 'border-border/65 bg-muted/35 text-muted-foreground hover:bg-muted hover:text-foreground',
+                          )}
+                        >
+                          {preset}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <SettingField label={t('settings.testContent')} description={t('settings.testContentDesc')} stretch>
+                  <SettingField label={t('settings.testContent')} description={t('settings.testContentDesc')}>
                     <textarea
-                      rows={3}
+                      rows={5}
                       value={settingsForm.test_content}
                       placeholder={t('settings.testContentPlaceholder')}
                       onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setSettingsForm(f => ({ ...f, test_content: e.target.value }))}
                       onBlur={(e) => autoSaveStringField('test_content', e.currentTarget.value)}
                       className={cn(
-                        'flex min-h-[88px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50',
+                        'flex min-h-[124px] max-h-[240px] w-full resize-y rounded-xl border border-input bg-background px-3 py-2.5 text-sm text-foreground shadow-2xs transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50',
                       )}
                     />
                   </SettingField>
                 </div>
               </SettingsCard>
-              </div>
 
               <SettingsCard
                 title={t('settings.autoResetCreditsTitle')}
@@ -5997,32 +6403,43 @@ export default function Settings() {
                 title={t('settings.systemStatus')}
                 icon={<Activity className="size-4" />}
                 badge={
-                  <Badge variant="secondary" className="text-[11px]">
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-500/20 dark:bg-emerald-500/15 dark:text-emerald-300">
+                    <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" aria-hidden="true" />
                     {t('settings.nav.live')}
-                  </Badge>
+                  </span>
                 }
               >
                 <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-4">
                   <StatusTile label={t('settings.service')} icon={<Activity className="size-4" />}>
-                    <Badge variant={health?.status === 'ok' ? 'default' : 'destructive'} className="gap-1.5">
-                      <span className={`size-1.5 rounded-full ${health?.status === 'ok' ? 'bg-emerald-500' : 'bg-red-400'}`} />
+                    <span
+                      className={cn(
+                        'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-sans text-xs font-medium ring-1 ring-inset',
+                        health?.status === 'ok'
+                          ? 'bg-emerald-500/10 text-emerald-700 ring-emerald-500/20 dark:bg-emerald-500/15 dark:text-emerald-300'
+                          : 'bg-rose-500/10 text-rose-700 ring-rose-500/20 dark:bg-rose-500/15 dark:text-rose-300',
+                      )}
+                    >
+                      <span className={cn('size-1.5 rounded-full', health?.status === 'ok' ? 'bg-emerald-500' : 'bg-rose-500')} />
                       {health?.status === 'ok' ? t('common.running') : t('common.error')}
-                    </Badge>
+                    </span>
                   </StatusTile>
                   <StatusTile label={t('settings.accountsLabel')} icon={<Users className="size-4" />}>
-                    {health?.available ?? 0} / {health?.total ?? 0}
+                    <span>
+                      {health?.available ?? 0}
+                      <span className="font-normal text-muted-foreground/75"> / {health?.total ?? 0}</span>
+                    </span>
                   </StatusTile>
                   <StatusTile label={settingsForm.database_label} icon={<Database className="size-4" />}>
-                    <Badge variant="default" className="gap-1.5">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 font-sans text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-500/20 dark:bg-emerald-500/15 dark:text-emerald-300">
                       <span className="size-1.5 rounded-full bg-emerald-500" />
                       {isExternalDatabase ? t('common.connected') : t('common.running')}
-                    </Badge>
+                    </span>
                   </StatusTile>
                   <StatusTile label={settingsForm.cache_label} icon={<Layers className="size-4" />}>
-                    <Badge variant="default" className="gap-1.5">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 font-sans text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-500/20 dark:bg-emerald-500/15 dark:text-emerald-300">
                       <span className="size-1.5 rounded-full bg-emerald-500" />
                       {isExternalCache ? t('common.connected') : t('common.running')}
-                    </Badge>
+                    </span>
                   </StatusTile>
                 </div>
               </SettingsCard>
@@ -6033,7 +6450,7 @@ export default function Settings() {
 
               <SettingsSection id="settings-traffic" title={t('settings.nav.traffic')} description={t('settings.nav.trafficDesc')} icon={<Gauge className="size-4" />}>
                 <SettingsCard title={t('settings.trafficProtection')} icon={<Gauge className="size-4" />} channels={ALL_UPSTREAM_CHANNELS}>
-                  <div className={SETTINGS_FIELD_GRID}>
+                  <div className={SETTINGS_FIELD_GRID_3}>
                     <SettingField label={t('settings.maxConcurrency')} description={t('settings.maxConcurrencyRange')} suffix={t('settings.unit.concurrency')}>
                       <DraftNumberInput
                         min={1}
@@ -7062,46 +7479,78 @@ export default function Settings() {
                           </div>
                         ))}
                       </div>
-                      <div className="data-table-shell hidden sm:block">
+                      <div className="data-table-shell hidden overflow-hidden rounded-xl border border-border/70 sm:block">
                         <Table>
                           <TableHeader>
-                            <TableRow>
-                              <TableHead className="text-[12px] font-semibold">{t('settings.method')}</TableHead>
-                              <TableHead className="text-[12px] font-semibold">{t('settings.path')}</TableHead>
-                              <TableHead className="text-[12px] font-semibold">{t('settings.endpointDesc')}</TableHead>
+                            <TableRow className="bg-muted/35 hover:bg-muted/35">
+                              <TableHead className="h-9 text-[11.5px] font-medium text-muted-foreground">{t('settings.method')}</TableHead>
+                              <TableHead className="h-9 text-[11.5px] font-medium text-muted-foreground">{t('settings.path')}</TableHead>
+                              <TableHead className="h-9 text-[11.5px] font-medium text-muted-foreground">{t('settings.endpointDesc')}</TableHead>
+                              <TableHead className="h-9 w-16 text-right text-[11.5px] font-medium text-muted-foreground" />
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            <TableRow>
-                              <TableCell><Badge variant="default" className="text-[12px]">POST</Badge></TableCell>
-                              <TableCell className="font-mono text-[13px]">/v1/chat/completions</TableCell>
-                              <TableCell className="text-[13px] text-muted-foreground">{t('settings.openaiCompat')}</TableCell>
-                            </TableRow>
-                            <TableRow>
-                              <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
-                              <TableCell className="font-mono text-[13px]">/v1/responses</TableCell>
-                              <TableCell className="text-[13px] text-muted-foreground">{t('settings.responsesApi')}</TableCell>
-                            </TableRow>
-                            <TableRow>
-                              <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
-                              <TableCell className="font-mono text-[13px]">/v1/messages</TableCell>
-                              <TableCell className="text-[13px] text-muted-foreground">{t('settings2.messagesEndpoint')}</TableCell>
-                            </TableRow>
-                            <TableRow>
-                              <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
-                              <TableCell className="font-mono text-[13px]">/v1/images/generations</TableCell>
-                              <TableCell className="text-[13px] text-muted-foreground">{t('settings.imageGenerationApi')}</TableCell>
-                            </TableRow>
-                            <TableRow>
-                              <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
-                              <TableCell className="font-mono text-[13px]">/v1/images/edits</TableCell>
-                              <TableCell className="text-[13px] text-muted-foreground">{t('settings.imageEditApi')}</TableCell>
-                            </TableRow>
-                            <TableRow>
-                              <TableCell><Badge variant="secondary" className="text-[12px]">GET</Badge></TableCell>
-                              <TableCell className="font-mono text-[13px]">/v1/models</TableCell>
-                              <TableCell className="text-[13px] text-muted-foreground">{t('settings.modelList')}</TableCell>
-                            </TableRow>
+                            {([
+                              { method: 'POST', prefix: '/v1/', tail: 'chat/completions', desc: t('settings.openaiCompat') },
+                              { method: 'POST', prefix: '/v1/', tail: 'responses', desc: t('settings.responsesApi') },
+                              { method: 'POST', prefix: '/v1/', tail: 'messages', desc: t('settings2.messagesEndpoint') },
+                              { method: 'POST', prefix: '/v1/', tail: 'images/generations', desc: t('settings.imageGenerationApi') },
+                              { method: 'POST', prefix: '/v1/', tail: 'images/edits', desc: t('settings.imageEditApi') },
+                              { method: 'GET', prefix: '/v1/', tail: 'models', desc: t('settings.modelList') },
+                            ] as const).map((ep) => {
+                              const fullPath = `${ep.prefix}${ep.tail}`
+                              return (
+                                <TableRow key={fullPath} className="border-border/45 transition-colors hover:bg-muted/30">
+                                  <TableCell className="py-2.5">
+                                    <span
+                                      className={cn(
+                                        'inline-flex h-5 items-center rounded-md px-1.5 font-mono text-[10.5px] font-semibold ring-1 ring-inset',
+                                        ep.method === 'GET'
+                                          ? 'bg-emerald-500/10 text-emerald-700 ring-emerald-500/20 dark:bg-emerald-500/15 dark:text-emerald-300'
+                                          : 'bg-sky-500/10 text-sky-700 ring-sky-500/20 dark:bg-sky-500/15 dark:text-sky-300',
+                                      )}
+                                    >
+                                      {ep.method}
+                                    </span>
+                                  </TableCell>
+                                  <TableCell className="py-2.5 font-mono text-[12.5px]">
+                                    <span className="text-muted-foreground/55">{ep.prefix}</span>
+                                    <span className="font-medium text-foreground">{ep.tail}</span>
+                                  </TableCell>
+                                  <TableCell className="py-2.5 text-xs text-muted-foreground">{ep.desc}</TableCell>
+                                  <TableCell className="py-2.5 text-right">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        void navigator.clipboard?.writeText(fullPath).catch(() => {})
+                                        setCopiedEndpoint(fullPath)
+                                        if (copiedEndpointTimerRef.current !== null) {
+                                          window.clearTimeout(copiedEndpointTimerRef.current)
+                                        }
+                                        copiedEndpointTimerRef.current = window.setTimeout(() => {
+                                          setCopiedEndpoint(null)
+                                        }, 1600)
+                                        showToast(`${t('settings.copiedEndpoint')}: ${fullPath}`, 'success', 1500)
+                                      }}
+                                      title={copiedEndpoint === fullPath ? t('settings.copiedEndpoint') : t('settings.copyEndpoint')}
+                                      aria-label={`${t('settings.copyEndpoint')} ${fullPath}`}
+                                      className={cn(
+                                        'inline-flex size-7 items-center justify-center rounded-lg transition-all duration-150',
+                                        copiedEndpoint === fullPath
+                                          ? 'bg-emerald-500/12 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400'
+                                          : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                                      )}
+                                    >
+                                      {copiedEndpoint === fullPath ? (
+                                        <Check className="size-3.5" />
+                                      ) : (
+                                        <Copy className="size-3.5" />
+                                      )}
+                                    </button>
+                                  </TableCell>
+                                </TableRow>
+                              )
+                            })}
                           </TableBody>
                         </Table>
                       </div>
@@ -7111,30 +7560,63 @@ export default function Settings() {
             </>
           ) : null}
           </div>
-        </div>
+        </motion.div>
 
         {/* 只有手动保存字段有改动时才出现的底部操作条；开关/下拉类已自动保存，不需要它。 */}
-        {dirtyCount > 0 ? (
-          <div
-            role="status"
-            className="sticky bottom-3 z-30 mt-2 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/30 bg-card/95 px-4 py-2.5 shadow-lg backdrop-blur-md max-lg:bottom-[calc(5.5rem+env(safe-area-inset-bottom,0px))]"
-          >
-            <div className="flex min-w-0 items-center gap-2.5">
-              <span className="size-2 shrink-0 rounded-full bg-amber-500" aria-hidden="true" />
-              <div className="min-w-0">
-                <div className="text-sm font-semibold text-foreground">{t('settings.saveStatusUnsaved', { n: dirtyCount })}</div>
-                <p className="text-[11px] leading-relaxed text-muted-foreground sm:text-xs">{t('settings.saveStatusUnsavedHint')}</p>
+        <AnimatePresence>
+          {dirtyCount > 0 ? (
+            <motion.div
+              key="settings-unsaved-bar"
+              role="status"
+              initial={reducedMotion ? false : { opacity: 0, y: 18, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={reducedMotion ? { opacity: 0 } : { opacity: 0, y: 14, scale: 0.98 }}
+              transition={reducedMotion ? { duration: 0 } : { type: 'spring', stiffness: 420, damping: 32 }}
+              className="sticky bottom-3 z-30 mx-auto mt-3 flex max-w-3xl flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-500/35 bg-popover/95 px-4 py-2.5 shadow-[0_18px_46px_rgba(15,23,42,0.16)] backdrop-blur-xl dark:shadow-[0_20px_50px_rgba(0,0,0,0.45)] max-lg:bottom-[calc(5.5rem+env(safe-area-inset-bottom,0px))]"
+            >
+              <div className="flex min-w-0 items-center gap-2.5">
+                <span className="relative flex size-2 shrink-0" aria-hidden="true">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+                  <span className="relative inline-flex size-2 rounded-full bg-amber-500" />
+                </span>
+                <div className="min-w-0">
+                  <div className="text-[13.5px] font-semibold text-foreground">{t('settings.saveStatusUnsaved', { n: dirtyCount })}</div>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">{t('settings.saveStatusUnsavedHint')}</p>
+                </div>
               </div>
-            </div>
-            <div className="flex shrink-0 items-center gap-2 max-sm:w-full">
-              <Button variant="ghost" size="sm" onClick={discardChanges} disabled={savingSettings} className="max-sm:flex-1">
-                <RotateCcw className="size-3.5" />
-                {t('settings.discardChanges')}
-              </Button>
-              {renderSaveButton('max-sm:flex-1')}
-            </div>
-          </div>
-        ) : null}
+              <div className="flex shrink-0 items-center gap-2 max-sm:w-full">
+                <Button variant="ghost" size="sm" onClick={discardChanges} disabled={savingSettings} className="h-8 rounded-xl max-sm:flex-1">
+                  <RotateCcw className="size-3.5" />
+                  {t('settings.discardChanges')}
+                </Button>
+                {renderSaveButton('h-8 rounded-xl max-sm:flex-1', true)}
+              </div>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+
+        {/* 长页面滚动时浮现的快捷返回顶部按钮 */}
+        <AnimatePresence>
+          {showBackToTop ? (
+            <motion.button
+              key="settings-back-to-top"
+              type="button"
+              initial={reducedMotion ? false : { opacity: 0, y: 12, scale: 0.92 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={reducedMotion ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.92 }}
+              transition={reducedMotion ? { duration: 0 } : { duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+              onClick={() => window.scrollTo({ top: 0, behavior: reducedMotion ? 'auto' : 'smooth' })}
+              title={t('settings.backToTop')}
+              aria-label={t('settings.backToTop')}
+              className={cn(
+                'fixed right-6 z-25 hidden size-10 items-center justify-center rounded-full border border-border/75 bg-card/90 text-muted-foreground shadow-lg backdrop-blur-xl transition-colors hover:border-primary/40 hover:text-primary md:inline-flex',
+                dirtyCount > 0 ? 'bottom-20' : 'bottom-6',
+              )}
+            >
+              <ArrowUp className="size-4" />
+            </motion.button>
+          ) : null}
+        </AnimatePresence>
       </>
     </StateShell>
   )
