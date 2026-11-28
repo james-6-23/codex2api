@@ -1,5 +1,35 @@
 # Changelog
 
+## v3.2.2 - 2026-11-28
+
+### Features
+
+- **New OpenCode upstream channel for OpenCode Go subscriptions and OpenCode Zen pay-as-you-go keys (#921, requested by @Todd-Liang).** One account pool serves `/v1/chat/completions`, `/v1/responses`, `/v1/messages` and `/v1/models`. Per-model protocol rules pick the native endpoint or convert between protocols. Go accounts sync rolling, weekly and monthly quota snapshots every 5 to 15 minutes. Accounts can be imported from plain text, JSON or Sub2API `opencode_go` exports, deduplicated by key fingerprint, and exported back. Test connections, quality tests, intelligence checks, groups and proxies use the shared account tools. `OPENCODE_USER_AGENT_VERSION` overrides the default `opencode/1.19.6` User-Agent. The channel has not yet been tested against real OpenCode accounts.
+
+- **Claude OAuth accounts can stay authorized while lazy mode is on (#934, requested by @AceCandy).** The new `claude_oauth_keepalive_enabled` setting is off by default. When enabled, accounts with a valid refresh token renew their access token 30 minutes before expiry on the background inspection interval, without running usage, generation or recovery probes. API key, setup token, disabled and permanently revoked accounts are skipped, and 5-hour and 7-day quota cooldowns are kept. Background refresh and request-time refresh share the cross-instance refresh lease, so a refresh token is not consumed twice. Rotated tokens are saved with retries even if the caller disconnects. `invalid_grant` is treated as permanent; network errors, 429 and 5xx back off and honor `Retry-After`. Account details show the last renewal, renewal warnings and the next retry. Background quiet hours take precedence over keepalive.
+
+- **Self-service account cards show subscription renewal and quota details (#935, @Blaskyy).** Cards and details on the public usage page show subscription status and renewal date, 5-hour, 7-day and Spark windows with sampling and reset times, sanitized rate-limit reasons, recovery times and credit usage. Unavailable values are no longer shown as zero. The reset-credit badge opens the account details, and redeeming a reset still requires a separate confirmation. Reauthorization is disabled when it is unavailable.
+
+- **The admin interface adopts a new default Studio theme and refreshed pages.** Status badges, cards, tables and dialogs use the new styling, and a command palette is available for navigation. The OpenCode, Image Studio, Proxies and Model Pricing pages have been redesigned, and the login page and logo have been updated. Saved color themes are kept; only browsers without a saved theme switch to Studio.
+
+- **The Model Pricing page always lists the built-in Claude models.** As with Codex, Grok, Antigravity and OpenCode, Claude models appear even when no Claude account is configured. Native `claude-*` models remain grouped under the Claude channel when an Antigravity account also declares them.
+
+### Fixes
+
+- **Loading the login page no longer locks out administrators.** Login throttling previously counted every keyless request as a failed attempt, so reloading the dashboard five times locked the IP for 10 minutes before a password was entered. Requests without a key now return 401 without being counted; wrong keys are still throttled. The login page shows the lockout and the remaining minutes instead of reporting an invalid secret.
+
+- **Codex accounts rejected with 401 return to service only after a verified probe (#932, @saiveen1).** Restarts and token refreshes previously cleared the authorization cooldown even though the upstream had not accepted the credential again. The cooldown now persists until the current probe succeeds with the same credential that was rejected. A newer 401, a rotated credential or an unrelated success cannot release it. Paused accounts stay paused, and cooldown extensions are preserved.
+
+- **Folder imports keep OAuth identity conflict protection across batches (#933, @saiveen1).** Large JSON imports are split into batches of up to 100 files and 150 MiB, and all batches are validated before any account is saved. When the same identity appears with different credentials in different batches, the whole group is skipped instead of creating or overwriting an account. Cancelling before commit saves no accounts or proxies. Imports above 100 batches are rejected, and a failed JSON import stops before TXT files are imported.
+
+- **Requests with invalid input images are not retried (#930, @saiveen1).** When the upstream reports that the input image data is invalid, the gateway returns the error immediately, even if 400 retries or catch-all retries are enabled. The images endpoint returns this error as HTTP 400. Other errors keep the configured retry policy.
+
+- **Custom builds no longer show official release update alerts (#931, @saiveen1).** Builds such as `custom.abcdef1` cannot be ordered against releases, so they no longer show an update indicator or report themselves as up to date. The version menu identifies custom builds, and an official frontend connected to a custom backend uses the backend's identity.
+
+- **Saving account settings no longer resubmits unchanged groups (#929, @saiveen1).** Editing only labels or other fields sent the existing `group_ids`, which the server treats as a manual change and which could cancel automatic group recovery. Groups are sent only when membership changes; reordering is ignored, and clearing all groups still saves.
+
+- **Pool forecasts include Codex Business accounts (#928, @saiveen1).** Accounts on `business`, `self_serve_business_usage_based` and `self_serve_business_prolite` with a 5-hour usage snapshot now count toward the 5-hour forecast, and 100% usage is shown as exhausted.
+
 ## v3.2.1 - 2026-11-27
 
 ### Features
